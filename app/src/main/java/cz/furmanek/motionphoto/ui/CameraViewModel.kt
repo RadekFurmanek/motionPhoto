@@ -45,6 +45,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun onShutter() = session.onShutter()
 
+    fun setShutterKeysActive(active: Boolean) {
+        session.shutterKeysActive = active
+    }
+
     fun pauseRecording() = session.pauseRecording()
 
     fun resumeRecording() = session.resumeRecording()

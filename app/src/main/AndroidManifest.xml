@@ -32,9 +32,11 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
-        <!-- Not locked to portrait: the controller takes the photo orientation from the display. -->
+        <!-- Not locked to portrait: the controller takes the photo orientation from the display.
+             Rotation must not recreate it, or a running recording or the photo under review would be lost. -->
         <activity
             android:name=".CaptureIntentActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="true"
             android:theme="@android:style/Theme.Material.NoActionBar">
             <intent-filter>

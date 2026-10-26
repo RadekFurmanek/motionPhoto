@@ -125,7 +125,8 @@ class CameraSession(
     private val _state = MutableStateFlow(SessionState())
     val state: StateFlow<SessionState> = _state.asStateFlow()
 
-    private val _events = MutableSharedFlow<SessionEvent>(extraBufferCapacity = 8)
+    // Emitted with tryEmit: a slow consumer must never hold up a capture.
+    private val _events = MutableSharedFlow<SessionEvent>(extraBufferCapacity = EVENT_BUFFER)
     val events: SharedFlow<SessionEvent> = _events.asSharedFlow()
 
     private var settings = CameraSettings()
@@ -140,7 +141,8 @@ class CameraSession(
     private var bindJob: Job? = null
     private var photoJob: Job? = null
     private var cameraObservers: Job? = null
-    private var uiVisible = false
+    private val uiVisibility = UiVisibility()
+    private val uiVisible: Boolean get() = uiVisibility.anyVisible
     private var selectedBackCameraId: String? = null
     private var targetRotation = Surface.ROTATION_0
     private var requestedZoomRatio = 1f
@@ -202,7 +204,7 @@ class CameraSession(
     }
 
     fun onUiVisible(visible: Boolean) {
-        uiVisible = visible
+        if (visible) uiVisibility.shown() else uiVisibility.hidden()
         // Another screen (capture for another app) may have bound the camera meanwhile, which unbinds ours.
         val preview = preview
         if (visible && preview != null && provider?.isBound(preview) == false) {
@@ -279,12 +281,12 @@ class CameraSession(
                 _state.update { it.copy(countdown = null) }
                 val saved = shoot(imageCapture)
                 _state.update { it.copy(lastCapture = saved.uri) }
-                _events.emit(SessionEvent.Saved(saved))
+                _events.tryEmit(SessionEvent.Saved(saved))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Capture failed", e)
-                _events.emit(SessionEvent.CaptureFailed(e.message ?: e.javaClass.simpleName))
+                _events.tryEmit(SessionEvent.CaptureFailed(e.message ?: e.javaClass.simpleName))
             } finally {
                 _state.update { it.copy(busy = false, countdown = null) }
                 applyTargetRotation()
@@ -317,8 +319,11 @@ class CameraSession(
         }
     }
 
-    /** Whether the volume keys act as the shutter (a setting). */
-    val volumeKeyShutter: Boolean get() = settings.volumeKeyShutter
+    /** Set by the camera screen while its viewfinder is showing (not under settings or the permission screen). */
+    var shutterKeysActive: Boolean = false
+
+    /** Whether the volume and camera keys should fire the shutter right now. */
+    val volumeKeyShutter: Boolean get() = settings.volumeKeyShutter && shutterKeysActive
 
     fun startRecording() {
         val current = _state.value
@@ -426,7 +431,17 @@ class CameraSession(
         val key = bindingKey(target)
         if (key == boundKey && camera != null) return
         bindJob?.cancel()
-        bindJob = scope.launch { bind(key, target) }
+        bindJob = scope.launch {
+            try {
+                bind(key, target)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // CameraX init failures (no usable camera, camera service down) must not kill the app.
+                Log.e(TAG, "Opening the camera failed", e)
+                fail(app.getString(R.string.camera_error_bind, e.message ?: e.javaClass.simpleName))
+            }
+        }
     }
 
     private suspend fun bind(key: BindingKey, target: PreviewTarget) {
@@ -452,8 +467,10 @@ class CameraSession(
         }
 
         var lastError: RuntimeException? = null
-        val attempts = bindingAttempts(key.mode, key.livePhoto)
-        for ((index, kinds) in attempts.withIndex()) {
+        val wantsVideoExtras = key.videoFps60 || key.videoStabilization
+        val attempts = bindingAttempts(key.mode, key.livePhoto, wantsVideoExtras)
+        for ((index, attempt) in attempts.withIndex()) {
+            val kinds = attempt.kinds
             val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect)).build()
                 .also { it.surfaceProvider = target.surfaceProvider }
             val imageCapture = if (UseCaseKind.IMAGE in kinds) {
@@ -470,8 +487,8 @@ class CameraSession(
                 videoQuality != null -> buildVideoCapture(
                     quality = videoQuality,
                     aspect = AspectRatio.RATIO_16_9,
-                    fps60 = key.videoFps60 && videoQuality in capabilities.fps60Qualities,
-                    stabilization = key.videoStabilization && capabilities.videoStabilization,
+                    fps60 = attempt.videoExtras && key.videoFps60 && videoQuality in capabilities.fps60Qualities,
+                    stabilization = attempt.videoExtras && key.videoStabilization && capabilities.videoStabilization,
                     mirror = key.mirrorFrontCamera,
                 )
                 else -> buildVideoCapture(
@@ -663,6 +680,7 @@ class CameraSession(
         const val FOCUS_AUTO_CANCEL_SECONDS = 3L
         const val FPS_60 = 60
         const val COUNTDOWN_STEP_MS = 1_000L
+        const val EVENT_BUFFER = 64
 
         // 1:1 is cropped from the 4:3 stream by the view port.
         fun PhotoAspect.streamAspect(): Int =

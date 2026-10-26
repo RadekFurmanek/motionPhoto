@@ -12,18 +12,35 @@ class BindingPlanTest {
     @Test
     fun `live photo falls back to a plain photo binding`() {
         assertEquals(
-            listOf(setOf(PREVIEW, IMAGE, VIDEO), setOf(PREVIEW, IMAGE)),
-            bindingAttempts(CaptureMode.PHOTO, livePhoto = true),
+            listOf(BindingAttempt(setOf(PREVIEW, IMAGE, VIDEO)), BindingAttempt(setOf(PREVIEW, IMAGE))),
+            bindingAttempts(CaptureMode.PHOTO, livePhoto = true, videoExtras = true),
         )
     }
 
     @Test
     fun `plain photo binds preview and still capture only`() {
-        assertEquals(listOf(setOf(PREVIEW, IMAGE)), bindingAttempts(CaptureMode.PHOTO, livePhoto = false))
+        assertEquals(
+            listOf(BindingAttempt(setOf(PREVIEW, IMAGE))),
+            bindingAttempts(CaptureMode.PHOTO, livePhoto = false, videoExtras = false),
+        )
     }
 
     @Test
     fun `video binds preview and video capture`() {
-        assertEquals(listOf(setOf(PREVIEW, VIDEO)), bindingAttempts(CaptureMode.VIDEO, livePhoto = true))
+        assertEquals(
+            listOf(BindingAttempt(setOf(PREVIEW, VIDEO), videoExtras = true)),
+            bindingAttempts(CaptureMode.VIDEO, livePhoto = true, videoExtras = false),
+        )
+    }
+
+    @Test
+    fun `video with 60 fps or stabilization falls back to plain video`() {
+        assertEquals(
+            listOf(
+                BindingAttempt(setOf(PREVIEW, VIDEO), videoExtras = true),
+                BindingAttempt(setOf(PREVIEW, VIDEO), videoExtras = false),
+            ),
+            bindingAttempts(CaptureMode.VIDEO, livePhoto = false, videoExtras = true),
+        )
     }
 }

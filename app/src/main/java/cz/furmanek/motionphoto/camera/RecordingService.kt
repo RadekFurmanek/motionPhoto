@@ -31,6 +31,10 @@ class RecordingService : Service() {
                 ServiceCompat.startForeground(this, NOTIFICATION_ID, recordingNotification(this), foregroundServiceTypes(withAudio))
             }
             ACTION_STOP_RECORDING -> (application as MotionPhotoApp).cameraSession.stopRecording()
+            ACTION_STOP_SERVICE -> {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         }
         return START_NOT_STICKY
     }
@@ -38,6 +42,7 @@ class RecordingService : Service() {
     companion object {
         private const val ACTION_START = "cz.furmanek.motionphoto.action.START_RECORDING_SERVICE"
         private const val ACTION_STOP_RECORDING = "cz.furmanek.motionphoto.action.STOP_RECORDING"
+        private const val ACTION_STOP_SERVICE = "cz.furmanek.motionphoto.action.STOP_RECORDING_SERVICE"
         private const val EXTRA_WITH_AUDIO = "with_audio"
         private const val CHANNEL_RECORDING = "recording"
         private const val CHANNEL_RESULTS = "recording_results"
@@ -52,8 +57,18 @@ class RecordingService : Service() {
             )
         }
 
+        /**
+         * Delivered after ACTION_START, so the service has called startForeground first. Stopping it with
+         * stopService before that (a recording that fails right away) would crash the app.
+         */
         fun stop(context: Context) {
-            context.stopService(Intent(context, RecordingService::class.java))
+            val intent = Intent(context, RecordingService::class.java)
+            try {
+                context.startService(intent.setAction(ACTION_STOP_SERVICE))
+            } catch (_: IllegalStateException) {
+                // Background start refused: the service is not running any more, so a plain stop is safe.
+                context.stopService(intent)
+            }
         }
 
         /** Tells the user about a recording that ended badly while the app was not on screen. */

@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
@@ -87,6 +88,7 @@ import cz.furmanek.motionphoto.ui.components.ZoomChips
 import cz.furmanek.motionphoto.ui.components.outputAspect
 import kotlin.math.abs
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 
 private const val FOCUS_INDICATOR_VISIBLE_MS = 1_200L
 private const val EXPOSURE_SLIDER_VISIBLE_MS = 3_000L
@@ -124,8 +126,16 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
     }
     DeviceRotationEffect(onRotationChanged = viewModel::setTargetRotation)
 
+    // Volume keys shoot only while the viewfinder is what the user looks at.
+    DisposableEffect(viewModel, showSettings) {
+        viewModel.setShutterKeysActive(!showSettings)
+        onDispose { viewModel.setShutterKeysActive(false) }
+    }
+
     LaunchedEffect(viewModel) {
-        viewModel.events.collect { event ->
+        // collectLatest + Short: a new result replaces the one on screen instead of queueing behind it.
+        viewModel.events.collectLatest { event ->
+            snackbarHostState.currentSnackbarData?.dismiss()
             when (event) {
                 is SessionEvent.Saved -> {
                     val message = when (event.media.kind) {
@@ -137,6 +147,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                         message = resources.getString(message),
                         actionLabel = resources.getString(R.string.view),
                         withDismissAction = true,
+                        duration = SnackbarDuration.Short,
                     )
                     if (result == SnackbarResult.ActionPerformed) context.openMedia(event.media.uri)
                 }
@@ -304,9 +315,8 @@ private fun BottomControls(
             val lenses = capabilities.backLenses
             if (lenses.isNotEmpty() && state.lensFacing == LENS_FACING_BACK) {
                 LensChips(lenses, state.activeCameraId, onSelect = { if (!locked) viewModel.selectBackCamera(it) })
-            } else {
-                ZoomChips(zoomPresets(capabilities.minZoom, capabilities.maxZoom), state.zoomRatio, onSelect = viewModel::setZoom)
             }
+            ZoomChips(zoomPresets(capabilities.minZoom, capabilities.maxZoom), state.zoomRatio, onSelect = viewModel::setZoom)
         }
 
         ModeBar(MODES, settings.mode, enabled = !locked, onSelect = viewModel::setMode)
