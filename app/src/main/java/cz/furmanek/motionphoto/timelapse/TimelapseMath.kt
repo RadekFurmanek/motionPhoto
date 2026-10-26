@@ -5,9 +5,10 @@ val TIMELAPSE_INTERVALS_MS: List<Long> = listOf(500L, 1000L, 2000L, 5000L, 10000
 
 /**
  * RGBA (4 bytes per pixel, rows of [rowStride] bytes) to I420: the Y plane, then U, then V at half resolution.
+ * [offset] is the byte position of the first pixel, for converting a crop of a larger frame.
  * [width] and [height] must be even. BT.601 limited range in the usual 8-bit fixed-point form.
  */
-fun rgbaToI420(rgba: ByteArray, width: Int, height: Int, rowStride: Int): ByteArray {
+fun rgbaToI420(rgba: ByteArray, width: Int, height: Int, rowStride: Int, offset: Int = 0): ByteArray {
     require(width % 2 == 0 && height % 2 == 0) { "I420 needs even dimensions, got ${width}x$height" }
     val ySize = width * height
     val chromaWidth = width / 2
@@ -15,7 +16,7 @@ fun rgbaToI420(rgba: ByteArray, width: Int, height: Int, rowStride: Int): ByteAr
     val uOffset = ySize
     val vOffset = ySize + ySize / 4
     for (y in 0 until height) {
-        val row = y * rowStride
+        val row = offset + y * rowStride
         for (x in 0 until width) {
             val i = row + x * 4
             val r = rgba[i].toInt() and 0xFF
@@ -30,7 +31,7 @@ fun rgbaToI420(rgba: ByteArray, width: Int, height: Int, rowStride: Int): ByteAr
             var g = 0
             var b = 0
             for (dy in 0..1) for (dx in 0..1) {
-                val i = (cy * 2 + dy) * rowStride + (cx * 2 + dx) * 4
+                val i = offset + (cy * 2 + dy) * rowStride + (cx * 2 + dx) * 4
                 r += rgba[i].toInt() and 0xFF
                 g += rgba[i + 1].toInt() and 0xFF
                 b += rgba[i + 2].toInt() and 0xFF
@@ -55,3 +56,6 @@ fun frameTimestampUs(index: Int, fps: Int = TIMELAPSE_FPS): Long = index * 1_000
 fun timelapseOutputDurationMs(frames: Int, fps: Int = TIMELAPSE_FPS): Long = frames * 1_000L / fps
 
 const val TIMELAPSE_FPS = 30
+
+/** Encoders want dimensions in multiples of 16; frames are cropped to this size around their centre. */
+fun alignedEncoderSize(width: Int, height: Int): Pair<Int, Int> = (width / 16 * 16) to (height / 16 * 16)

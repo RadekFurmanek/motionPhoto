@@ -65,4 +65,23 @@ class TimelapseMathTest {
     fun `interval choices`() {
         assertEquals(listOf(500L, 1000L, 2000L, 5000L, 10000L), TIMELAPSE_INTERVALS_MS)
     }
+
+    @Test
+    fun `offset converts a crop of a larger frame`() {
+        // 6x4 frame: a red 4x2 block at (2, 2) inside black; the crop must see only red.
+        val rowStride = 6 * 4
+        val frame = solid(6, 4, 0, 0, 0)
+        for (y in 2 until 4) for (x in 2 until 6) {
+            val i = y * rowStride + x * 4
+            frame[i] = 255.toByte()
+        }
+        val crop = rgbaToI420(frame, 4, 2, rowStride, offset = 2 * rowStride + 2 * 4)
+        assertArrayEquals(rgbaToI420(solid(4, 2, 255, 0, 0), 4, 2, 16), crop)
+    }
+
+    @Test
+    fun `aligned size crops to multiples of 16`() {
+        assertEquals(1904 to 1072, alignedEncoderSize(1920 - 15, 1080))
+        assertEquals(1920 to 1072, alignedEncoderSize(1920, 1080))
+    }
 }
