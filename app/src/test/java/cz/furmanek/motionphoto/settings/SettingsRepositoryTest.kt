@@ -55,6 +55,8 @@ class SettingsRepositoryTest {
                 lensFacing = LENS_FACING_FRONT,
                 videoQuality = VideoQualitySetting.UHD,
                 grid = true,
+                slowMotionFps = 240,
+                hdr = true,
             )
         }
 
@@ -68,6 +70,8 @@ class SettingsRepositoryTest {
         assertEquals(LENS_FACING_FRONT, reloaded.lensFacing)
         assertEquals(VideoQualitySetting.UHD, reloaded.videoQuality)
         assertEquals(true, reloaded.grid)
+        assertEquals(240, reloaded.slowMotionFps)
+        assertEquals(true, reloaded.hdr)
     }
 
     @Test

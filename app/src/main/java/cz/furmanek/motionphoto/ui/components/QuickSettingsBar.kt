@@ -124,6 +124,8 @@ fun QuickSettingsBar(
                     }
                 }
             }
+            // Modes added in stage 2 get their own settings in Task 4.
+            else -> Unit
         }
         BarIcon(Icons.Filled.Settings, stringResource(R.string.settings), enabled = !locked, onClick = onOpenSettings)
     }

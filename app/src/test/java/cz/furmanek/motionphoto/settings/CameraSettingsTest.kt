@@ -26,4 +26,23 @@ class CameraSettingsTest {
         assertFalse(CameraSettings(shutterSound = false).shutterSoundRequired(mustPlay = false))
         assertTrue(CameraSettings(shutterSound = true).shutterSoundRequired(mustPlay = false))
     }
+
+    @Test
+    fun `turning hdr on turns live photo off`() {
+        val settings = CameraSettings(livePhoto = true).withHdr(true)
+        assertTrue(settings.hdr)
+        assertFalse(settings.livePhoto)
+    }
+
+    @Test
+    fun `turning live photo on turns hdr off`() {
+        val settings = CameraSettings(hdr = true, livePhoto = false).withLivePhoto(true)
+        assertTrue(settings.livePhoto)
+        assertFalse(settings.hdr)
+    }
+
+    @Test
+    fun `hdr suppresses the live photo`() {
+        assertFalse(CameraSettings(livePhoto = true, hdr = true).effectiveLivePhoto())
+    }
 }
