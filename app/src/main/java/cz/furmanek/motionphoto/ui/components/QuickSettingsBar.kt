@@ -50,6 +50,7 @@ fun QuickSettingsBar(
     settings: CameraSettings,
     capabilities: CameraCapabilities?,
     locked: Boolean,
+    livePhotoAvailable: Boolean,
     onUpdate: ((CameraSettings) -> CameraSettings) -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
@@ -83,8 +84,9 @@ fun QuickSettingsBar(
                 BarText(stringResource(settings.aspect.labelRes()), stringResource(R.string.aspect_ratio), enabled = !locked) {
                     onUpdate { it.copy(aspect = PhotoAspect.entries.next(it.aspect)) }
                 }
-                // Shown crossed out while the flash setting turns live photo off for the shot.
-                BarIcon(
+                // Shown crossed out while the flash setting turns live photo off for the shot;
+                // hidden on cameras that cannot record the clip next to the still.
+                if (livePhotoAvailable) BarIcon(
                     if (settings.effectiveLivePhoto()) Icons.Filled.MotionPhotosOn else Icons.Filled.MotionPhotosOff,
                     stringResource(R.string.live_photo),
                     enabled = !locked,

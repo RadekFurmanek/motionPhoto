@@ -84,6 +84,8 @@ data class SessionState(
     val busy: Boolean = false,
     val countdown: Int? = null,
     val lastCapture: Uri? = null,
+    /** False when this camera cannot stream preview, still and video together; photos are then plain. */
+    val livePhotoAvailable: Boolean = true,
 )
 
 sealed interface SessionEvent {
@@ -440,66 +442,87 @@ class CameraSession(
         val lensFacing = cameraInfo.lensFacing
 
         val photoAspect = if (key.mode == CaptureMode.VIDEO) AspectRatio.RATIO_16_9 else key.aspect.streamAspect()
-        val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect)).build()
-            .also { it.surfaceProvider = target.surfaceProvider }
-        val group = UseCaseGroup.Builder()
-            .setViewPort(viewPort(key))
-            .addUseCase(preview)
-        var imageCapture: ImageCapture? = null
-        var videoCapture: VideoCapture<Recorder>? = null
-        when (key.mode) {
-            CaptureMode.PHOTO -> {
-                imageCapture = ImageCapture.Builder()
+        val videoQuality = if (key.mode == CaptureMode.VIDEO) {
+            resolveVideoQuality(key.videoQuality, capabilities.videoQualities) ?: run {
+                fail(app.getString(R.string.camera_error_no_video))
+                return
+            }
+        } else {
+            null
+        }
+
+        var lastError: RuntimeException? = null
+        val attempts = bindingAttempts(key.mode, key.livePhoto)
+        for ((index, kinds) in attempts.withIndex()) {
+            val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect)).build()
+                .also { it.surfaceProvider = target.surfaceProvider }
+            val imageCapture = if (UseCaseKind.IMAGE in kinds) {
+                ImageCapture.Builder()
                     // Minimal shutter lag keeps a live photo's still close to its stamped moment in the clip.
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                     .setResolutionSelector(resolutionSelector(photoAspect))
                     .build()
-                group.addUseCase(imageCapture)
-                if (key.livePhoto) {
-                    videoCapture = buildVideoCapture(
-                        quality = VideoQualitySetting.FHD,
-                        aspect = photoAspect,
-                        fps60 = false,
-                        stabilization = false,
-                        mirror = key.mirrorFrontCamera,
-                    )
-                    group.addUseCase(videoCapture)
-                }
+            } else {
+                null
             }
-            CaptureMode.VIDEO -> {
-                val quality = resolveVideoQuality(key.videoQuality, capabilities.videoQualities) ?: run {
-                    fail(app.getString(R.string.camera_error_no_video))
-                    return
-                }
-                videoCapture = buildVideoCapture(
-                    quality = quality,
+            val videoCapture = when {
+                UseCaseKind.VIDEO !in kinds -> null
+                videoQuality != null -> buildVideoCapture(
+                    quality = videoQuality,
                     aspect = AspectRatio.RATIO_16_9,
-                    fps60 = key.videoFps60 && quality in capabilities.fps60Qualities,
+                    fps60 = key.videoFps60 && videoQuality in capabilities.fps60Qualities,
                     stabilization = key.videoStabilization && capabilities.videoStabilization,
                     mirror = key.mirrorFrontCamera,
                 )
-                group.addUseCase(videoCapture)
+                else -> buildVideoCapture(
+                    quality = VideoQualitySetting.FHD,
+                    aspect = photoAspect,
+                    fps60 = false,
+                    stabilization = false,
+                    mirror = key.mirrorFrontCamera,
+                )
             }
-        }
+            val group = UseCaseGroup.Builder().setViewPort(viewPort(key)).addUseCase(preview)
+            imageCapture?.let(group::addUseCase)
+            videoCapture?.let(group::addUseCase)
 
-        val bound = try {
-            provider.unbindAll()
-            provider.bindToLifecycle(this, selector, group.build())
-        } catch (e: IllegalArgumentException) {
-            Log.e(TAG, "Binding use cases failed", e)
-            fail(app.getString(R.string.camera_error_bind, e.message ?: ""))
-            return
-        } catch (e: IllegalStateException) {
-            Log.e(TAG, "Binding use cases failed", e)
-            fail(app.getString(R.string.camera_error_bind, e.message ?: ""))
+            val bound = try {
+                provider.unbindAll()
+                provider.bindToLifecycle(this, selector, group.build())
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "Binding $kinds failed", e)
+                lastError = e
+                continue
+            } catch (e: IllegalStateException) {
+                Log.w(TAG, "Binding $kinds failed", e)
+                lastError = e
+                continue
+            }
+            // A live photo that had to drop its video stream is not available on this camera.
+            val livePhotoAvailable = !(key.mode == CaptureMode.PHOTO && key.livePhoto && index > 0)
+            onBound(key, bound, preview, imageCapture, videoCapture, capabilities, lensFacing, livePhotoAvailable)
             return
         }
+        Log.e(TAG, "Binding use cases failed", lastError)
+        fail(app.getString(R.string.camera_error_bind, lastError?.message ?: ""))
+    }
 
+    private fun onBound(
+        key: BindingKey,
+        bound: Camera,
+        preview: Preview,
+        imageCapture: ImageCapture?,
+        videoCapture: VideoCapture<Recorder>?,
+        capabilities: CameraCapabilities,
+        lensFacing: Int,
+        livePhotoAvailable: Boolean,
+    ) {
+        val sameCamera = boundKey?.let { it.lensFacing == key.lensFacing && it.backCameraId == key.backCameraId } == true
         this.camera = bound
         this.preview = preview
         this.imageCapture = imageCapture
         this.videoCapture = videoCapture
-        boundKey = key
+        this.boundKey = key
         requestedZoomRatio = bound.cameraInfo.zoomState.value?.zoomRatio ?: 1f
         applyTargetRotation()
         applyCameraControls()
@@ -511,6 +534,12 @@ class CameraSession(
                 activeCameraId = cameraId(bound),
                 lensFacing = lensFacing,
                 exposureIndex = 0,
+                // Known only when a live photo binding was tried; a plain-photo binding keeps what this camera showed.
+                livePhotoAvailable = when {
+                    key.mode == CaptureMode.PHOTO && key.livePhoto -> livePhotoAvailable
+                    sameCamera -> it.livePhotoAvailable
+                    else -> true
+                },
             )
         }
     }

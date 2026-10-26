@@ -213,6 +213,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 settings = settings,
                 capabilities = capabilities,
                 locked = locked,
+                livePhotoAvailable = state.livePhotoAvailable,
                 onUpdate = viewModel::updateSettings,
                 onOpenSettings = { showSettings = true },
             )
@@ -227,7 +228,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 .padding(bottom = 16.dp),
             viewModel = viewModel,
             exposureSlider = {
-                if (exposureVisible && canAdjustExposure && exposureRange != null) {
+                if (exposureVisible && canAdjustExposure) {
                     ExposureSlider(
                         index = state.exposureIndex,
                         range = exposureRange,
@@ -332,7 +333,8 @@ private fun BottomControls(
             ShutterButton(
                 isVideo = isVideo,
                 isRecording = recording != null,
-                showClipProgress = state.busy && state.countdown == null && !isVideo && settings.effectiveLivePhoto(),
+                showClipProgress = state.busy && state.countdown == null && !isVideo && settings.effectiveLivePhoto() &&
+                    state.livePhotoAvailable,
                 // During the self-timer the shutter cancels the countdown.
                 enabled = ready && (!state.busy || state.countdown != null),
                 onClick = viewModel::onShutter,
