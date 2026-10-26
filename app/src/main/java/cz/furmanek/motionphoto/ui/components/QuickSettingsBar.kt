@@ -1,5 +1,6 @@
 package cz.furmanek.motionphoto.ui.components
 
+import androidx.camera.extensions.ExtensionMode
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,6 +14,8 @@ import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FlashlightOff
 import androidx.compose.material.icons.filled.FlashlightOn
+import androidx.compose.material.icons.filled.HdrOff
+import androidx.compose.material.icons.filled.HdrOn
 import androidx.compose.material.icons.filled.MotionPhotosOff
 import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.Settings
@@ -40,6 +43,8 @@ import cz.furmanek.motionphoto.settings.FlashSetting
 import cz.furmanek.motionphoto.settings.PhotoAspect
 import cz.furmanek.motionphoto.settings.TimerSetting
 import cz.furmanek.motionphoto.settings.effectiveLivePhoto
+import cz.furmanek.motionphoto.settings.withHdr
+import cz.furmanek.motionphoto.settings.withLivePhoto
 
 /**
  * Settings for the current mode. Only what [capabilities] supports is shown; [locked] (capture or recording
@@ -63,49 +68,40 @@ fun QuickSettingsBar(
     ) {
         when (settings.mode) {
             CaptureMode.PHOTO -> {
-                if (hasFlash) {
-                    val (icon, label) = when (settings.flash) {
-                        FlashSetting.OFF -> Icons.Filled.FlashOff to R.string.flash_off
-                        FlashSetting.AUTO -> Icons.Filled.FlashAuto to R.string.flash_auto
-                        FlashSetting.ON -> Icons.Filled.FlashOn to R.string.flash_on
-                    }
-                    BarIcon(icon, stringResource(label), enabled = !locked) {
-                        onUpdate { it.copy(flash = FlashSetting.entries.next(it.flash)) }
-                    }
-                }
-                val timerIcon = when (settings.timer) {
-                    TimerSetting.OFF -> Icons.Filled.TimerOff
-                    TimerSetting.THREE -> Icons.Filled.Timer3
-                    TimerSetting.TEN -> Icons.Filled.Timer10
-                }
-                BarIcon(timerIcon, stringResource(R.string.timer), enabled = !locked) {
-                    onUpdate { it.copy(timer = TimerSetting.entries.next(it.timer)) }
-                }
+                if (hasFlash) FlashButton(settings, locked, onUpdate)
+                TimerButton(settings, locked, onUpdate)
                 BarText(stringResource(settings.aspect.labelRes()), stringResource(R.string.aspect_ratio), enabled = !locked) {
                     onUpdate { it.copy(aspect = PhotoAspect.entries.next(it.aspect)) }
                 }
-                // Shown crossed out while the flash setting turns live photo off for the shot;
-                // hidden on cameras that cannot record the clip next to the still.
-                if (livePhotoAvailable) BarIcon(
-                    if (settings.effectiveLivePhoto()) Icons.Filled.MotionPhotosOn else Icons.Filled.MotionPhotosOff,
-                    stringResource(R.string.live_photo),
-                    enabled = !locked,
-                    highlighted = settings.effectiveLivePhoto(),
-                ) {
-                    onUpdate { it.copy(livePhoto = !it.livePhoto) }
-                }
-            }
-            CaptureMode.VIDEO -> {
-                if (hasFlash) {
+                if (ExtensionMode.HDR in capabilities?.extensionModes.orEmpty()) {
                     BarIcon(
-                        if (settings.torch) Icons.Filled.FlashlightOn else Icons.Filled.FlashlightOff,
-                        stringResource(R.string.torch),
-                        enabled = true,
-                        highlighted = settings.torch,
+                        if (settings.hdr) Icons.Filled.HdrOn else Icons.Filled.HdrOff,
+                        stringResource(R.string.hdr),
+                        enabled = !locked,
+                        highlighted = settings.hdr,
                     ) {
-                        onUpdate { it.copy(torch = !it.torch) }
+                        onUpdate { it.withHdr(!it.hdr) }
                     }
                 }
+                // Shown crossed out while flash or HDR turns live photo off for the shot;
+                // hidden on cameras that cannot record the clip next to the still.
+                if (livePhotoAvailable) {
+                    BarIcon(
+                        if (settings.effectiveLivePhoto()) Icons.Filled.MotionPhotosOn else Icons.Filled.MotionPhotosOff,
+                        stringResource(R.string.live_photo),
+                        enabled = !locked,
+                        highlighted = settings.effectiveLivePhoto(),
+                    ) {
+                        onUpdate { it.withLivePhoto(!it.livePhoto) }
+                    }
+                }
+            }
+            CaptureMode.PORTRAIT, CaptureMode.NIGHT -> {
+                if (hasFlash) FlashButton(settings, locked, onUpdate)
+                TimerButton(settings, locked, onUpdate)
+            }
+            CaptureMode.VIDEO -> {
+                if (hasFlash) TorchButton(settings, onUpdate)
                 val qualities = capabilities?.videoQualities.orEmpty()
                 val quality = resolveVideoQuality(settings.videoQuality, qualities)
                 if (quality != null && qualities.size > 1) {
@@ -124,10 +120,60 @@ fun QuickSettingsBar(
                     }
                 }
             }
-            // Modes added in stage 2 get their own settings in Task 4.
-            else -> Unit
+            CaptureMode.SLOW_MOTION -> {
+                if (hasFlash) TorchButton(settings, onUpdate)
+                val rates = capabilities?.slowMotionFps.orEmpty().sorted()
+                val rate = settings.slowMotionFps.takeIf { it in rates } ?: rates.maxOrNull()
+                if (rate != null) {
+                    BarText(
+                        stringResource(R.string.slow_motion_fps, rate),
+                        stringResource(R.string.settings_section_slow_motion),
+                        enabled = !locked && rates.size > 1,
+                    ) {
+                        onUpdate { it.copy(slowMotionFps = rates.next(rate)) }
+                    }
+                }
+            }
+            CaptureMode.TIMELAPSE, CaptureMode.PANORAMA -> Unit
         }
         BarIcon(Icons.Filled.Settings, stringResource(R.string.settings), enabled = !locked, onClick = onOpenSettings)
+    }
+}
+
+@Composable
+private fun FlashButton(settings: CameraSettings, locked: Boolean, onUpdate: ((CameraSettings) -> CameraSettings) -> Unit) {
+    val (icon, label) = when (settings.flash) {
+        FlashSetting.OFF -> Icons.Filled.FlashOff to R.string.flash_off
+        FlashSetting.AUTO -> Icons.Filled.FlashAuto to R.string.flash_auto
+        FlashSetting.ON -> Icons.Filled.FlashOn to R.string.flash_on
+    }
+    BarIcon(icon, stringResource(label), enabled = !locked) {
+        onUpdate { it.copy(flash = FlashSetting.entries.next(it.flash)) }
+    }
+}
+
+@Composable
+private fun TimerButton(settings: CameraSettings, locked: Boolean, onUpdate: ((CameraSettings) -> CameraSettings) -> Unit) {
+    val icon = when (settings.timer) {
+        TimerSetting.OFF -> Icons.Filled.TimerOff
+        TimerSetting.THREE -> Icons.Filled.Timer3
+        TimerSetting.TEN -> Icons.Filled.Timer10
+    }
+    BarIcon(icon, stringResource(R.string.timer), enabled = !locked) {
+        onUpdate { it.copy(timer = TimerSetting.entries.next(it.timer)) }
+    }
+}
+
+/** The torch stays switchable during a recording. */
+@Composable
+private fun TorchButton(settings: CameraSettings, onUpdate: ((CameraSettings) -> CameraSettings) -> Unit) {
+    BarIcon(
+        if (settings.torch) Icons.Filled.FlashlightOn else Icons.Filled.FlashlightOff,
+        stringResource(R.string.torch),
+        enabled = true,
+        highlighted = settings.torch,
+    ) {
+        onUpdate { it.copy(torch = !it.torch) }
     }
 }
 

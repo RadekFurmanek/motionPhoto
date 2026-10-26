@@ -37,6 +37,7 @@ fun ShutterButton(
     showClipProgress: Boolean,
     enabled: Boolean,
     onClick: () -> Unit,
+    processing: Boolean = false,
 ) {
     val progress = remember { Animatable(0f) }
     LaunchedEffect(showClipProgress) {
@@ -56,6 +57,14 @@ fun ShutterButton(
             isRecording -> Box(Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)).background(RecordRed))
             isVideo -> Box(Modifier.size(64.dp).clip(CircleShape).background(RecordRed.copy(alpha = alpha)))
             else -> Box(Modifier.size(64.dp).clip(CircleShape).background(Color.White.copy(alpha = alpha)))
+        }
+        if (processing) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(80.dp),
+                color = Color.White,
+                strokeWidth = 4.dp,
+                trackColor = Color.Transparent,
+            )
         }
         if (showClipProgress) {
             CircularProgressIndicator(

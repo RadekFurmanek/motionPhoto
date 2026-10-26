@@ -69,4 +69,12 @@
     <string name="intent_busy">Fotoaparát právě natáčí video</string>
     <string name="intent_video_recorded">Video natočeno (%1$s)</string>
     <string name="intent_failed">Výsledek se nepodařilo předat: %1$s</string>
+    <string name="mode_slow_motion">ZPOMALENÉ</string>
+    <string name="mode_portrait">PORTRÉT</string>
+    <string name="mode_night">NOC</string>
+    <string name="mode_timelapse">ČASOSBĚR</string>
+    <string name="mode_panorama">PANORAMA</string>
+    <string name="hdr">HDR</string>
+    <string name="slow_motion_fps">%1$d fps</string>
+    <string name="settings_section_slow_motion">Zpomalené video</string>
 </resources>
