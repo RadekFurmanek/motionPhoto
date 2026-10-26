@@ -1,5 +1,6 @@
 package cz.furmanek.motionphoto.camera
 
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
@@ -23,6 +24,7 @@ import cz.furmanek.motionphoto.settings.VideoQualitySetting
 object CapabilityProbe {
 
     private const val FPS_60 = 60
+    private const val TAG = "CapabilityProbe"
 
     private val SLOW_MOTION_RATES = listOf(120, 240)
     private val EXTENSION_MODES = listOf(ExtensionMode.BOKEH, ExtensionMode.NIGHT, ExtensionMode.HDR)
@@ -56,13 +58,11 @@ object CapabilityProbe {
             backLenses = backLenses(provider),
             hasFrontCamera = provider.hasCameraSafely(CameraSelector.DEFAULT_FRONT_CAMERA),
             hasBackCamera = provider.hasCameraSafely(CameraSelector.DEFAULT_BACK_CAMERA),
-            slowMotionFps = SLOW_MOTION_RATES.filterTo(mutableSetOf()) { slowMotionQuality(cameraInfo, it) != null },
-            extensionModes = EXTENSION_MODES.filterTo(mutableSetOf()) { mode ->
-                try {
-                    extensions?.isExtensionAvailable(selector, mode) == true
-                } catch (_: IllegalArgumentException) {
-                    false
-                }
+            slowMotionFps = optional("slow motion") {
+                SLOW_MOTION_RATES.filterTo(mutableSetOf()) { slowMotionQuality(cameraInfo, it) != null }
+            },
+            extensionModes = optional("extensions") {
+                EXTENSION_MODES.filterTo(mutableSetOf()) { extensions?.isExtensionAvailable(selector, it) == true }
             },
         )
     }
@@ -81,8 +81,8 @@ object CapabilityProbe {
         return qualities.firstOrNull { quality ->
             val video = VideoCapture.withOutput(Recorder.Builder().setQualitySelector(QualitySelector.from(quality)).build())
             try {
-                cameraInfo.getSupportedFrameRateRanges(HighSpeedVideoSessionConfig(video, Preview.Builder().build()))
-                    .any { it.upper >= fps }
+                val ranges = cameraInfo.getSupportedFrameRateRanges(HighSpeedVideoSessionConfig(video, Preview.Builder().build()))
+                supportsFixedRate(ranges.map { it.lower to it.upper }, fps)
             } catch (_: IllegalArgumentException) {
                 false
             } catch (_: IllegalStateException) {
@@ -90,6 +90,15 @@ object CapabilityProbe {
             }
         }
     }
+
+    /** Optional features must never break plain Photo and Video: any failure while probing them means "none". */
+    private inline fun optional(feature: String, probe: () -> Set<Int>): Set<Int> =
+        try {
+            probe()
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Probing $feature failed", e)
+            emptySet()
+        }
 
     fun toQuality(setting: VideoQualitySetting): Quality = when (setting) {
         VideoQualitySetting.SD -> Quality.SD

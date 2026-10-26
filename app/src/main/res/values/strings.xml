@@ -77,4 +77,5 @@
     <string name="hdr">HDR</string>
     <string name="slow_motion_fps">%1$d fps</string>
     <string name="settings_section_slow_motion">Zpomalené video</string>
+    <string name="mode_unavailable">Tento režim se na fotoaparátu nepodařilo spustit, přepínám na Foto</string>
 </resources>

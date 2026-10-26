@@ -587,11 +587,24 @@ class CameraSession(
             return
         }
         Log.e(TAG, "Binding use cases failed", lastError)
-        fail(app.getString(R.string.camera_error_bind, lastError?.message ?: ""))
+        fallBackOrFail(lastError)
+    }
+
+    /**
+     * A maker mode, HDR or slow motion that the probe offered but the camera then refused falls back to a
+     * simpler setup (the settings change rebinds) instead of leaving the user on an error screen.
+     */
+    private suspend fun fallBackOrFail(error: Throwable?) {
+        if (afterBindFailure(settings) != null) {
+            _events.tryEmit(SessionEvent.CaptureFailed(app.getString(R.string.mode_unavailable)))
+            settingsRepository.update { afterBindFailure(it) ?: it }
+            return
+        }
+        fail(app.getString(R.string.camera_error_bind, error?.message ?: ""))
     }
 
     /** High-speed recording has its own session shape: one preview and one video stream at a fixed rate. */
-    private fun bindSlowMotion(
+    private suspend fun bindSlowMotion(
         key: BindingKey,
         target: PreviewTarget,
         provider: ProcessCameraProvider,
@@ -601,7 +614,7 @@ class CameraSession(
     ) {
         val fps = key.slowMotionFps.takeIf { it in capabilities.slowMotionFps } ?: capabilities.slowMotionFps.max()
         val quality = CapabilityProbe.slowMotionQuality(cameraInfo, fps) ?: run {
-            fail(app.getString(R.string.camera_error_no_video))
+            fallBackOrFail(null)
             return
         }
         val preview = Preview.Builder().build().also { it.surfaceProvider = target.surfaceProvider }
@@ -614,11 +627,11 @@ class CameraSession(
             provider.bindToLifecycle(this, selector, session)
         } catch (e: IllegalArgumentException) {
             Log.e(TAG, "Binding slow motion failed", e)
-            fail(app.getString(R.string.camera_error_bind, e.message ?: ""))
+            fallBackOrFail(e)
             return
         } catch (e: IllegalStateException) {
             Log.e(TAG, "Binding slow motion failed", e)
-            fail(app.getString(R.string.camera_error_bind, e.message ?: ""))
+            fallBackOrFail(e)
             return
         }
         onBound(key, bound, preview, null, videoCapture, capabilities, cameraInfo.lensFacing, livePhotoAvailable = true)
