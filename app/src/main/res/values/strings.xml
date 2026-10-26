@@ -12,4 +12,11 @@
     <string name="error_capture">Pořízení se nezdařilo: %1$s</string>
     <string name="error_camera">Fotoaparát nelze spustit: %1$s</string>
     <string name="zoom_ratio">%1$.1f×</string>
+    <string name="camera_error_no_camera">Telefon nemá dostupný fotoaparát</string>
+    <string name="camera_error_no_video">Tento fotoaparát neumí natáčet video</string>
+    <string name="camera_error_bind">Fotoaparát nelze spustit: %1$s</string>
+    <string name="camera_error_in_use">Fotoaparát používá jiná aplikace</string>
+    <string name="camera_error_disabled">Fotoaparát je zakázaný zásadami zařízení</string>
+    <string name="camera_error_dnd">Fotoaparát nejde spustit v režimu Nerušit</string>
+    <string name="camera_error_generic">Chyba fotoaparátu</string>
 </resources>

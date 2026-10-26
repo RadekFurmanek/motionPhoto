@@ -4,10 +4,8 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.res.Configuration
 import android.net.Uri
-import android.util.Rational
 import android.view.OrientationEventListener
 import android.view.Surface
-import androidx.camera.core.ViewPort
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -63,22 +61,22 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cz.furmanek.motionphoto.R
-import cz.furmanek.motionphoto.camera.CameraEvent
-import cz.furmanek.motionphoto.camera.CameraViewModel
+import cz.furmanek.motionphoto.camera.PhotoCapture
+import cz.furmanek.motionphoto.camera.SessionEvent
+import cz.furmanek.motionphoto.camera.SessionStatus
 import kotlinx.coroutines.delay
 
 private const val FOCUS_INDICATOR_VISIBLE_MS = 1_200L
 
 @Composable
 fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val state by viewModel.sessionState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val resources = LocalResources.current
-    val lifecycleOwner = LocalLifecycleOwner.current
     val displayRotation = LocalView.current.display?.rotation ?: Surface.ROTATION_0
     val isPortrait = LocalConfiguration.current.orientation != Configuration.ORIENTATION_LANDSCAPE
     val snackbarHostState = remember { SnackbarHostState() }
@@ -88,14 +86,14 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
         PreviewView(context).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
     }
 
-    LaunchedEffect(state.lensFacing, lifecycleOwner, displayRotation, isPortrait) {
-        val viewPort = ViewPort.Builder(if (isPortrait) Rational(3, 4) else Rational(4, 3), displayRotation)
-            .setScaleType(ViewPort.FILL_CENTER)
-            .build()
-        viewModel.bindCamera(lifecycleOwner, previewView.surfaceProvider, viewPort)
+    DisposableEffect(viewModel, displayRotation, isPortrait) {
+        val surfaceProvider = previewView.surfaceProvider
+        viewModel.attachPreview(surfaceProvider, displayRotation, isPortrait, previewView.meteringPointFactory)
+        onDispose { viewModel.detachPreview(surfaceProvider) }
     }
-    DisposableEffect(viewModel) {
-        onDispose { viewModel.detachPreview() }
+    LifecycleStartEffect(viewModel) {
+        viewModel.onUiVisible(true)
+        onStopOrDispose { viewModel.onUiVisible(false) }
     }
 
     DeviceRotationEffect(onRotationChanged = viewModel::setTargetRotation)
@@ -103,7 +101,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
     LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
             when (event) {
-                is CameraEvent.Saved -> {
+                is SessionEvent.Saved -> {
                     val result = snackbarHostState.showSnackbar(
                         message = resources.getString(R.string.saved),
                         actionLabel = resources.getString(R.string.view),
@@ -111,10 +109,8 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                     )
                     if (result == SnackbarResult.ActionPerformed) context.openImage(event.uri)
                 }
-                is CameraEvent.CaptureFailed ->
+                is SessionEvent.CaptureFailed ->
                     snackbarHostState.showSnackbar(resources.getString(R.string.error_capture, event.message))
-                is CameraEvent.CameraUnavailable ->
-                    snackbarHostState.showSnackbar(resources.getString(R.string.error_camera, event.message))
             }
         }
     }
@@ -142,7 +138,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                     detectTapGestures { offset ->
                         focusPoint = offset
                         focusTapCount++
-                        viewModel.focusOn(previewView.meteringPointFactory.createPoint(offset.x, offset.y))
+                        viewModel.focusAt(offset.x, offset.y)
                     }
                 }
                 .pointerInput(viewModel) {
@@ -169,7 +165,10 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 .padding(bottom = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            if (state.isCameraReady) {
+            state.errorMessage?.let {
+                Text(text = it, color = Color.White, modifier = Modifier.padding(bottom = 16.dp))
+            }
+            if (state.status == SessionStatus.READY) {
                 Text(
                     text = stringResource(R.string.zoom_ratio, state.zoomRatio),
                     color = Color.White,
@@ -180,6 +179,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 )
             }
             Spacer(Modifier.size(24.dp))
+            val canSwitch = state.capabilities?.let { it.hasFrontCamera && it.hasBackCamera } == true && !state.busy
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
@@ -187,13 +187,13 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
             ) {
                 Spacer(Modifier.size(56.dp))
                 ShutterButton(
-                    enabled = state.isCameraReady && !state.isCapturing,
-                    isCapturing = state.isCapturing,
+                    enabled = state.status == SessionStatus.READY && !state.busy,
+                    isCapturing = state.busy,
                     onClick = viewModel::capture,
                 )
                 IconButton(
                     onClick = viewModel::switchCamera,
-                    enabled = state.canSwitchCamera && !state.isCapturing,
+                    enabled = canSwitch,
                     modifier = Modifier
                         .size(56.dp)
                         .clip(CircleShape)
@@ -202,7 +202,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                     Icon(
                         imageVector = Icons.Filled.Cameraswitch,
                         contentDescription = stringResource(R.string.switch_camera),
-                        tint = if (state.canSwitchCamera && !state.isCapturing) Color.White else Color.Gray,
+                        tint = if (canSwitch) Color.White else Color.Gray,
                     )
                 }
             }
@@ -216,7 +216,7 @@ private fun ShutterButton(enabled: Boolean, isCapturing: Boolean, onClick: () ->
     LaunchedEffect(isCapturing) {
         progress.snapTo(0f)
         if (isCapturing) {
-            progress.animateTo(1f, tween(CameraViewModel.CLIP_DURATION_MS.toInt(), easing = LinearEasing))
+            progress.animateTo(1f, tween(PhotoCapture.CLIP_DURATION_MS.toInt(), easing = LinearEasing))
         }
     }
 

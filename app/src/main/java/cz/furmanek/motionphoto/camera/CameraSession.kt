@@ -1,0 +1,504 @@
+package cz.furmanek.motionphoto.camera
+
+import android.app.Application
+import android.net.Uri
+import android.util.Log
+import android.util.Rational
+import android.view.Surface
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.AspectRatio
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.CameraState
+import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.MeteringPointFactory
+import androidx.camera.core.MirrorMode
+import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ViewPort
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.lifecycle.awaitInstance
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.VideoCapture
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.asFlow
+import cz.furmanek.motionphoto.R
+import cz.furmanek.motionphoto.media.MediaStoreWriter
+import cz.furmanek.motionphoto.settings.CameraSettings
+import cz.furmanek.motionphoto.settings.CaptureMode
+import cz.furmanek.motionphoto.settings.FlashSetting
+import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
+import cz.furmanek.motionphoto.settings.LENS_FACING_FRONT
+import cz.furmanek.motionphoto.settings.PhotoAspect
+import cz.furmanek.motionphoto.settings.SettingsRepository
+import cz.furmanek.motionphoto.settings.VideoQualitySetting
+import cz.furmanek.motionphoto.settings.effectiveLivePhoto
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+enum class SessionStatus { CLOSED, OPENING, READY, ERROR }
+
+data class RecordingState(val durationNanos: Long, val paused: Boolean, val withAudio: Boolean)
+
+data class SessionState(
+    val status: SessionStatus = SessionStatus.CLOSED,
+    val errorMessage: String? = null,
+    val capabilities: CameraCapabilities? = null,
+    val activeCameraId: String? = null,
+    val lensFacing: Int = LENS_FACING_BACK,
+    val zoomRatio: Float = 1f,
+    val exposureIndex: Int = 0,
+    val recording: RecordingState? = null,
+    val busy: Boolean = false,
+    val countdown: Int? = null,
+    val lastCapture: Uri? = null,
+)
+
+sealed interface SessionEvent {
+    data class Saved(val uri: Uri) : SessionEvent
+    data class CaptureFailed(val message: String) : SessionEvent
+}
+
+/**
+ * Owns the camera for the whole app process. Its lifecycle is STARTED while the camera UI is visible
+ * or a recording runs, so a recording outlives the Activity. UIs only attach a preview surface.
+ */
+class CameraSession(
+    private val app: Application,
+    private val settingsRepository: SettingsRepository,
+    writer: MediaStoreWriter,
+) : LifecycleOwner {
+
+    private val registry = LifecycleRegistry(this).apply { currentState = Lifecycle.State.CREATED }
+    override val lifecycle: Lifecycle get() = registry
+
+    private val scope = MainScope()
+    private val photoCapture = PhotoCapture(app, writer)
+
+    private val _state = MutableStateFlow(SessionState())
+    val state: StateFlow<SessionState> = _state.asStateFlow()
+
+    private val _events = MutableSharedFlow<SessionEvent>(extraBufferCapacity = 8)
+    val events: SharedFlow<SessionEvent> = _events.asSharedFlow()
+
+    private var settings = CameraSettings()
+    private var settingsLoaded = false
+    private var provider: ProcessCameraProvider? = null
+    private var camera: Camera? = null
+    private var preview: Preview? = null
+    private var imageCapture: ImageCapture? = null
+    private var videoCapture: VideoCapture<Recorder>? = null
+    private var target: PreviewTarget? = null
+    private var boundKey: BindingKey? = null
+    private var bindJob: Job? = null
+    private var cameraObservers: Job? = null
+    private var uiVisible = false
+    private var selectedBackCameraId: String? = null
+    private var targetRotation = Surface.ROTATION_0
+    private var requestedZoomRatio = 1f
+
+    private class PreviewTarget(
+        val surfaceProvider: Preview.SurfaceProvider,
+        val displayRotation: Int,
+        val portrait: Boolean,
+        val meteringFactory: MeteringPointFactory,
+    )
+
+    /** Everything that needs a new set of use cases when it changes. */
+    private data class BindingKey(
+        val mode: CaptureMode,
+        val livePhoto: Boolean,
+        val lensFacing: Int,
+        val backCameraId: String?,
+        val aspect: PhotoAspect,
+        val videoQuality: VideoQualitySetting,
+        val videoFps60: Boolean,
+        val videoStabilization: Boolean,
+        val mirrorFrontCamera: Boolean,
+        val displayRotation: Int,
+        val portrait: Boolean,
+    )
+
+    init {
+        scope.launch(Dispatchers.IO) { PhotoCapture.deleteTempFiles(app.cacheDir) }
+        scope.launch {
+            settingsRepository.settings.collect { new ->
+                settings = new
+                settingsLoaded = true
+                applyCameraControls()
+                requestBind()
+            }
+        }
+    }
+
+    fun attachPreview(
+        surfaceProvider: Preview.SurfaceProvider,
+        displayRotation: Int,
+        portrait: Boolean,
+        meteringFactory: MeteringPointFactory,
+    ) {
+        target = PreviewTarget(surfaceProvider, displayRotation, portrait, meteringFactory)
+        preview?.surfaceProvider = surfaceProvider
+        requestBind()
+    }
+
+    /** Detaches [surfaceProvider] if it is still the attached one; a newer UI may already have replaced it. */
+    fun detachPreview(surfaceProvider: Preview.SurfaceProvider) {
+        if (target?.surfaceProvider !== surfaceProvider) return
+        target = null
+        preview?.surfaceProvider = null
+    }
+
+    fun onUiVisible(visible: Boolean) {
+        uiVisible = visible
+        updateLifecycle()
+    }
+
+    /** Switches to a separately exposed back camera (ultra-wide, telephoto); null returns to the default one. */
+    fun selectBackCamera(cameraId: String?) {
+        if (isLocked()) return
+        selectedBackCameraId = cameraId
+        requestBind()
+    }
+
+    fun setZoom(ratio: Float) {
+        val camera = camera ?: return
+        val zoom = camera.cameraInfo.zoomState.value ?: return
+        requestedZoomRatio = ratio.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio)
+        camera.cameraControl.setZoomRatio(requestedZoomRatio)
+    }
+
+    /** Multiplies the zoom by [scaleFactor]; chains from the last requested ratio, which leads fast pinches. */
+    fun zoomBy(scaleFactor: Float) = setZoom(requestedZoomRatio * scaleFactor)
+
+    fun focusAt(x: Float, y: Float) {
+        val camera = camera ?: return
+        val factory = target?.meteringFactory ?: return
+        val action = FocusMeteringAction.Builder(
+            factory.createPoint(x, y),
+            FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
+        )
+            .setAutoCancelDuration(FOCUS_AUTO_CANCEL_SECONDS, TimeUnit.SECONDS)
+            .build()
+        if (camera.cameraInfo.isFocusMeteringSupported(action)) {
+            camera.cameraControl.startFocusAndMetering(action)
+        }
+    }
+
+    fun setExposureIndex(index: Int) {
+        val camera = camera ?: return
+        val range = _state.value.capabilities?.exposureRange ?: return
+        val clamped = index.coerceIn(range)
+        camera.cameraControl.setExposureCompensationIndex(clamped)
+        _state.update { it.copy(exposureIndex = clamped) }
+    }
+
+    /** Orientation photos and videos are saved in, as a [Surface] rotation; held while a capture runs. */
+    fun setTargetRotation(rotation: Int) {
+        targetRotation = rotation
+        if (!isLocked()) applyTargetRotation()
+    }
+
+    fun takePhoto() {
+        val current = _state.value
+        val imageCapture = imageCapture
+        if (current.status != SessionStatus.READY || current.busy || current.recording != null || imageCapture == null) {
+            return
+        }
+        _state.update { it.copy(busy = true) }
+        scope.launch {
+            try {
+                val capturedAt = System.currentTimeMillis()
+                val videoCapture = videoCapture
+                val uri = if (settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && videoCapture != null) {
+                    photoCapture.captureMotionPhoto(imageCapture, videoCapture, capturedAt, location = null)
+                } else {
+                    photoCapture.capturePhoto(imageCapture, capturedAt, location = null)
+                }
+                _state.update { it.copy(lastCapture = uri) }
+                _events.emit(SessionEvent.Saved(uri))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Capture failed", e)
+                _events.emit(SessionEvent.CaptureFailed(e.message ?: e.javaClass.simpleName))
+            } finally {
+                _state.update { it.copy(busy = false) }
+                applyTargetRotation()
+                requestBind()
+            }
+        }
+    }
+
+    private fun isLocked(): Boolean = _state.value.busy || _state.value.recording != null
+
+    private fun updateLifecycle() {
+        registry.currentState = if (uiVisible || _state.value.recording != null) {
+            Lifecycle.State.STARTED
+        } else {
+            Lifecycle.State.CREATED
+        }
+    }
+
+    private fun bindingKey(target: PreviewTarget) = BindingKey(
+        mode = settings.mode,
+        livePhoto = settings.effectiveLivePhoto(),
+        lensFacing = settings.lensFacing,
+        backCameraId = selectedBackCameraId.takeIf { settings.lensFacing == LENS_FACING_BACK },
+        aspect = settings.aspect,
+        videoQuality = settings.videoQuality,
+        videoFps60 = settings.videoFps60,
+        videoStabilization = settings.videoStabilization,
+        mirrorFrontCamera = settings.mirrorFrontCamera,
+        displayRotation = target.displayRotation,
+        portrait = target.portrait,
+    )
+
+    /** Rebinds when the binding-relevant settings changed; postponed while a capture or recording runs. */
+    private fun requestBind() {
+        val target = target ?: return
+        if (!settingsLoaded || isLocked()) return
+        val key = bindingKey(target)
+        if (key == boundKey && camera != null) return
+        bindJob?.cancel()
+        bindJob = scope.launch { bind(key, target) }
+    }
+
+    private suspend fun bind(key: BindingKey, target: PreviewTarget) {
+        _state.update { it.copy(status = SessionStatus.OPENING, errorMessage = null) }
+        val provider = provider ?: ProcessCameraProvider.awaitInstance(app).also { provider = it }
+
+        val selector = selectorFor(provider, key) ?: run {
+            fail(app.getString(R.string.camera_error_no_camera))
+            return
+        }
+        val cameraInfo = provider.getCameraInfo(selector)
+        val capabilities = CapabilityProbe.probe(provider, cameraInfo)
+        val lensFacing = cameraInfo.lensFacing
+
+        val photoAspect = if (key.mode == CaptureMode.VIDEO) AspectRatio.RATIO_16_9 else key.aspect.streamAspect()
+        val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect)).build()
+            .also { it.surfaceProvider = target.surfaceProvider }
+        val group = UseCaseGroup.Builder()
+            .setViewPort(viewPort(key))
+            .addUseCase(preview)
+        var imageCapture: ImageCapture? = null
+        var videoCapture: VideoCapture<Recorder>? = null
+        when (key.mode) {
+            CaptureMode.PHOTO -> {
+                imageCapture = ImageCapture.Builder()
+                    // Minimal shutter lag keeps a live photo's still close to its stamped moment in the clip.
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                    .setResolutionSelector(resolutionSelector(photoAspect))
+                    .build()
+                group.addUseCase(imageCapture)
+                if (key.livePhoto) {
+                    videoCapture = buildVideoCapture(
+                        quality = VideoQualitySetting.FHD,
+                        aspect = photoAspect,
+                        fps60 = false,
+                        stabilization = false,
+                        mirror = key.mirrorFrontCamera,
+                    )
+                    group.addUseCase(videoCapture)
+                }
+            }
+            CaptureMode.VIDEO -> {
+                val quality = resolveVideoQuality(key.videoQuality, capabilities.videoQualities) ?: run {
+                    fail(app.getString(R.string.camera_error_no_video))
+                    return
+                }
+                videoCapture = buildVideoCapture(
+                    quality = quality,
+                    aspect = AspectRatio.RATIO_16_9,
+                    fps60 = key.videoFps60 && quality in capabilities.fps60Qualities,
+                    stabilization = key.videoStabilization && capabilities.videoStabilization,
+                    mirror = key.mirrorFrontCamera,
+                )
+                group.addUseCase(videoCapture)
+            }
+        }
+
+        val bound = try {
+            provider.unbindAll()
+            provider.bindToLifecycle(this, selector, group.build())
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "Binding use cases failed", e)
+            fail(app.getString(R.string.camera_error_bind, e.message ?: ""))
+            return
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "Binding use cases failed", e)
+            fail(app.getString(R.string.camera_error_bind, e.message ?: ""))
+            return
+        }
+
+        this.camera = bound
+        this.preview = preview
+        this.imageCapture = imageCapture
+        this.videoCapture = videoCapture
+        boundKey = key
+        requestedZoomRatio = bound.cameraInfo.zoomState.value?.zoomRatio ?: 1f
+        applyTargetRotation()
+        applyCameraControls()
+        observeCamera(bound)
+        _state.update {
+            it.copy(
+                status = SessionStatus.READY,
+                capabilities = capabilities,
+                activeCameraId = cameraId(bound),
+                lensFacing = lensFacing,
+                exposureIndex = 0,
+            )
+        }
+    }
+
+    private fun observeCamera(camera: Camera) {
+        cameraObservers?.cancel()
+        cameraObservers = scope.launch {
+            launch {
+                camera.cameraInfo.zoomState.asFlow().collect { zoom ->
+                    _state.update { it.copy(zoomRatio = zoom.zoomRatio) }
+                }
+            }
+            launch {
+                camera.cameraInfo.cameraState.asFlow().collect { cameraState ->
+                    val error = cameraState.error
+                    if (error != null) {
+                        _state.update { it.copy(status = SessionStatus.ERROR, errorMessage = describe(error.code)) }
+                    } else if (cameraState.type == CameraState.Type.OPEN) {
+                        _state.update { it.copy(status = SessionStatus.READY, errorMessage = null) }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun applyCameraControls() {
+        imageCapture?.flashMode = when (settings.flash) {
+            FlashSetting.OFF -> ImageCapture.FLASH_MODE_OFF
+            FlashSetting.AUTO -> ImageCapture.FLASH_MODE_AUTO
+            FlashSetting.ON -> ImageCapture.FLASH_MODE_ON
+        }
+        val camera = camera ?: return
+        if (camera.cameraInfo.hasFlashUnit()) {
+            camera.cameraControl.enableTorch(settings.mode == CaptureMode.VIDEO && settings.torch)
+        }
+    }
+
+    private fun applyTargetRotation() {
+        imageCapture?.targetRotation = targetRotation
+        videoCapture?.targetRotation = targetRotation
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun selectorFor(provider: ProcessCameraProvider, key: BindingKey): CameraSelector? {
+        val backId = key.backCameraId
+        if (backId != null) {
+            val byId = CameraSelector.Builder()
+                .addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == backId } }
+                .build()
+            if (provider.hasCameraQuietly(byId)) return byId
+        }
+        val preferred = selectorFor(key.lensFacing)
+        if (provider.hasCameraQuietly(preferred)) return preferred
+        val other = selectorFor(if (key.lensFacing == LENS_FACING_BACK) LENS_FACING_FRONT else LENS_FACING_BACK)
+        return other.takeIf { provider.hasCameraQuietly(it) }
+    }
+
+    private fun selectorFor(lensFacing: Int) = CameraSelector.Builder().requireLensFacing(lensFacing).build()
+
+    private fun ProcessCameraProvider.hasCameraQuietly(selector: CameraSelector): Boolean =
+        try {
+            hasCamera(selector)
+        } catch (_: androidx.camera.core.CameraInfoUnavailableException) {
+            false
+        }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun cameraId(camera: Camera): String = Camera2CameraInfo.from(camera.cameraInfo).cameraId
+
+    private fun fail(message: String) {
+        camera = null
+        boundKey = null
+        _state.update { it.copy(status = SessionStatus.ERROR, errorMessage = message) }
+    }
+
+    private fun describe(errorCode: Int): String = app.getString(
+        when (errorCode) {
+            CameraState.ERROR_CAMERA_IN_USE, CameraState.ERROR_MAX_CAMERAS_IN_USE -> R.string.camera_error_in_use
+            CameraState.ERROR_CAMERA_DISABLED -> R.string.camera_error_disabled
+            CameraState.ERROR_DO_NOT_DISTURB_MODE_ENABLED -> R.string.camera_error_dnd
+            else -> R.string.camera_error_generic
+        },
+    )
+
+    private fun viewPort(key: BindingKey): ViewPort {
+        val (width, height) = when {
+            key.mode == CaptureMode.VIDEO -> 9 to 16
+            key.aspect == PhotoAspect.RATIO_16_9 -> 9 to 16
+            key.aspect == PhotoAspect.RATIO_1_1 -> 1 to 1
+            else -> 3 to 4
+        }
+        val aspect = if (key.portrait) Rational(width, height) else Rational(height, width)
+        return ViewPort.Builder(aspect, key.displayRotation).setScaleType(ViewPort.FILL_CENTER).build()
+    }
+
+    private fun buildVideoCapture(
+        quality: VideoQualitySetting,
+        aspect: Int,
+        fps60: Boolean,
+        stabilization: Boolean,
+        mirror: Boolean,
+    ): VideoCapture<Recorder> {
+        val recorder = Recorder.Builder()
+            .setQualitySelector(
+                QualitySelector.from(
+                    CapabilityProbe.toQuality(quality),
+                    FallbackStrategy.lowerQualityOrHigherThan(CapabilityProbe.toQuality(quality)),
+                ),
+            )
+            .setAspectRatio(aspect)
+            .build()
+        return VideoCapture.Builder(recorder)
+            .setMirrorMode(if (mirror) MirrorMode.MIRROR_MODE_ON_FRONT_ONLY else MirrorMode.MIRROR_MODE_OFF)
+            .setVideoStabilizationEnabled(stabilization)
+            .apply { if (fps60) setTargetFrameRate(android.util.Range(FPS_60, FPS_60)) }
+            .build()
+    }
+
+    private companion object {
+        const val TAG = "CameraSession"
+        const val FOCUS_AUTO_CANCEL_SECONDS = 3L
+        const val FPS_60 = 60
+
+        // 1:1 is cropped from the 4:3 stream by the view port.
+        fun PhotoAspect.streamAspect(): Int =
+            if (this == PhotoAspect.RATIO_16_9) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
+
+        fun resolutionSelector(aspect: Int): ResolutionSelector = ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy(aspect, AspectRatioStrategy.FALLBACK_RULE_AUTO))
+            .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+            .build()
+    }
+}
