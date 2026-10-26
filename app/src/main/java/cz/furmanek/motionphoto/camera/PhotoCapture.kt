@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
@@ -32,23 +33,38 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 
+/**
+ * Position of the still in the clip, in microseconds. The clip's first frame is derived from its end:
+ * the Recorder cuts at the stop request, while the encoder may start noticeably after the Start event.
+ */
+fun motionPhotoPresentationTimestampUs(stillNs: Long, stopNs: Long, clipDurationNs: Long): Long {
+    val firstFrameNs = stopNs - clipDurationNs
+    return TimeUnit.NANOSECONDS.toMicros((stillNs - firstFrameNs).coerceIn(0L, clipDurationNs))
+}
+
 /** Still and Motion Photo capture with the use cases the session currently has bound. */
 class PhotoCapture(private val context: Context, private val writer: MediaStoreWriter) {
 
     private val mainExecutor = ContextCompat.getMainExecutor(context)
 
+    /**
+     * [location] is awaited only when saving, so a slow fix never delays the shutter.
+     * [mirrored] flips the still horizontally (front camera with mirroring on); the clip is mirrored by its use case.
+     */
     suspend fun captureMotionPhoto(
         imageCapture: ImageCapture,
         videoCapture: VideoCapture<Recorder>,
         capturedAtMillis: Long,
-        location: Location?,
+        mirrored: Boolean,
+        location: Deferred<Location?>,
     ): Uri {
         val (videoFile, stillFile) = withContext(Dispatchers.IO) {
             File.createTempFile(TEMP_VIDEO_PREFIX, ".mp4", context.cacheDir) to
                 File.createTempFile(TEMP_STILL_PREFIX, ".jpg", context.cacheDir)
         }
         try {
-            val presentationTimestampUs = recordClipWithStill(imageCapture, videoCapture, videoFile, stillFile)
+            val presentationTimestampUs = recordClipWithStill(imageCapture, videoCapture, videoFile, stillFile, mirrored)
+            val location = location.await()
             return withContext(Dispatchers.IO) {
                 if (presentationTimestampUs != null) {
                     writer.saveMotionPhoto(stillFile, videoFile, presentationTimestampUs, capturedAtMillis, location)
@@ -65,10 +81,16 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
         }
     }
 
-    suspend fun capturePhoto(imageCapture: ImageCapture, capturedAtMillis: Long, location: Location?): Uri {
+    suspend fun capturePhoto(
+        imageCapture: ImageCapture,
+        capturedAtMillis: Long,
+        mirrored: Boolean,
+        location: Deferred<Location?>,
+    ): Uri {
         val stillFile = withContext(Dispatchers.IO) { File.createTempFile(TEMP_STILL_PREFIX, ".jpg", context.cacheDir) }
         try {
-            imageCapture.takePictureTo(stillFile)
+            imageCapture.takePictureTo(stillFile, mirrored)
+            val location = location.await()
             return withContext(Dispatchers.IO) { writer.savePhoto(stillFile, capturedAtMillis, location) }
         } finally {
             withContext(NonCancellable + Dispatchers.IO) { stillFile.delete() }
@@ -79,16 +101,14 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
      * Records a [CLIP_DURATION_MS] clip into [videoFile] and takes a full-resolution still into [stillFile]
      * [STILL_OFFSET_MS] after recording starts. Returns the still's position in the clip, in microseconds,
      * or null when the still was taken but the clip failed. Throws when the still itself failed.
-     *
-     * Both moments are measured on the elapsed-realtime clock. The video's t = 0 is derived from its end:
-     * the Recorder cuts the clip at the stop request, whereas the encoder may deliver its first frame
-     * noticeably later than the Start event.
+     * Both moments are measured on the elapsed-realtime clock.
      */
     private suspend fun recordClipWithStill(
         imageCapture: ImageCapture,
         videoCapture: VideoCapture<Recorder>,
         videoFile: File,
         stillFile: File,
+        mirrored: Boolean,
     ): Long? = coroutineScope {
         val started = CompletableDeferred<Long>()
         val finalized = CompletableDeferred<VideoRecordEvent.Finalize>()
@@ -108,7 +128,7 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
         try {
             val startNs = withTimeout(RECORDING_START_TIMEOUT_MS) { started.await() }
             delayUntil(startNs + TimeUnit.MILLISECONDS.toNanos(STILL_OFFSET_MS))
-            val stillNs = async { imageCapture.takePictureTo(stillFile) }
+            val stillNs = async { imageCapture.takePictureTo(stillFile, mirrored) }
             delayUntil(startNs + TimeUnit.MILLISECONDS.toNanos(CLIP_DURATION_MS))
             val stopNs = SystemClock.elapsedRealtimeNanos()
             recording.stop()
@@ -119,9 +139,7 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
                 Log.w(TAG, "Motion Photo clip failed (error ${finalize?.error}); saving the still alone", finalize?.cause)
                 return@coroutineScope null
             }
-            val clipDurationNs = finalize.recordingStats.recordedDurationNanos
-            val firstFrameNs = stopNs - clipDurationNs
-            TimeUnit.NANOSECONDS.toMicros((stillAtNs - firstFrameNs).coerceIn(0L, clipDurationNs))
+            motionPhotoPresentationTimestampUs(stillAtNs, stopNs, finalize.recordingStats.recordedDurationNanos)
         } finally {
             recording.close()
             if (!finalized.isCompleted) {
@@ -131,11 +149,12 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
     }
 
     /** Saves a JPEG to [file] and returns the elapsed-realtime moment its capture started. */
-    private suspend fun ImageCapture.takePictureTo(file: File): Long = suspendCancellableCoroutine { continuation ->
+    private suspend fun ImageCapture.takePictureTo(file: File, mirrored: Boolean): Long = suspendCancellableCoroutine { continuation ->
         val requestedAtNs = SystemClock.elapsedRealtimeNanos()
         var captureStartedNs = -1L
+        val metadata = ImageCapture.Metadata().apply { isReversedHorizontal = mirrored }
         takePicture(
-            ImageCapture.OutputFileOptions.Builder(file).build(),
+            ImageCapture.OutputFileOptions.Builder(file).setMetadata(metadata).build(),
             mainExecutor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onCaptureStarted() {

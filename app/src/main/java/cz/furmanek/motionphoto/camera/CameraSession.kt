@@ -1,7 +1,9 @@
 package cz.furmanek.motionphoto.camera
 
 import android.app.Application
+import android.media.MediaActionSound
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import android.util.Rational
 import android.view.Surface
@@ -43,11 +45,16 @@ import cz.furmanek.motionphoto.settings.PhotoAspect
 import cz.furmanek.motionphoto.settings.SettingsRepository
 import cz.furmanek.motionphoto.settings.VideoQualitySetting
 import cz.furmanek.motionphoto.settings.effectiveLivePhoto
+import cz.furmanek.motionphoto.settings.shutterSoundRequired
+import cz.furmanek.motionphoto.location.LocationProvider
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -95,6 +102,12 @@ class CameraSession(
 
     private val scope = MainScope()
     private val photoCapture = PhotoCapture(app, writer)
+    private val locationProvider = LocationProvider(app)
+    private val shutterSound = MediaActionSound().apply { load(MediaActionSound.SHUTTER_CLICK) }
+
+    /** True where the law requires the shutter sound (e.g. Japan); the setting cannot turn it off there. */
+    val shutterSoundMandatory: Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && MediaActionSound.mustPlayShutterSound()
 
     private val _state = MutableStateFlow(SessionState())
     val state: StateFlow<SessionState> = _state.asStateFlow()
@@ -112,6 +125,7 @@ class CameraSession(
     private var target: PreviewTarget? = null
     private var boundKey: BindingKey? = null
     private var bindJob: Job? = null
+    private var photoJob: Job? = null
     private var cameraObservers: Job? = null
     private var uiVisible = false
     private var selectedBackCameraId: String? = null
@@ -220,22 +234,26 @@ class CameraSession(
         if (!isLocked()) applyTargetRotation()
     }
 
+    /** Starts the self-timer or takes the photo right away; during a countdown it cancels the countdown. */
     fun takePhoto() {
+        if (_state.value.countdown != null) {
+            photoJob?.cancel()
+            return
+        }
         val current = _state.value
         val imageCapture = imageCapture
         if (current.status != SessionStatus.READY || current.busy || current.recording != null || imageCapture == null) {
             return
         }
         _state.update { it.copy(busy = true) }
-        scope.launch {
+        photoJob = scope.launch {
             try {
-                val capturedAt = System.currentTimeMillis()
-                val videoCapture = videoCapture
-                val uri = if (settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && videoCapture != null) {
-                    photoCapture.captureMotionPhoto(imageCapture, videoCapture, capturedAt, location = null)
-                } else {
-                    photoCapture.capturePhoto(imageCapture, capturedAt, location = null)
+                for (remaining in settings.timer.seconds downTo 1) {
+                    _state.update { it.copy(countdown = remaining) }
+                    delay(COUNTDOWN_STEP_MS)
                 }
+                _state.update { it.copy(countdown = null) }
+                val uri = shoot(imageCapture)
                 _state.update { it.copy(lastCapture = uri) }
                 _events.emit(SessionEvent.Saved(uri))
             } catch (e: CancellationException) {
@@ -244,10 +262,25 @@ class CameraSession(
                 Log.e(TAG, "Capture failed", e)
                 _events.emit(SessionEvent.CaptureFailed(e.message ?: e.javaClass.simpleName))
             } finally {
-                _state.update { it.copy(busy = false) }
+                _state.update { it.copy(busy = false, countdown = null) }
                 applyTargetRotation()
                 requestBind()
             }
+        }
+    }
+
+    private suspend fun shoot(imageCapture: ImageCapture): Uri = coroutineScope {
+        val capturedAt = System.currentTimeMillis()
+        val location = async {
+            if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
+        }
+        if (settings.shutterSoundRequired(shutterSoundMandatory)) shutterSound.play(MediaActionSound.SHUTTER_CLICK)
+        val mirrored = settings.mirrorFrontCamera && _state.value.lensFacing == LENS_FACING_FRONT
+        val videoCapture = videoCapture
+        if (settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && videoCapture != null) {
+            photoCapture.captureMotionPhoto(imageCapture, videoCapture, capturedAt, mirrored, location)
+        } else {
+            photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location)
         }
     }
 
@@ -491,6 +524,7 @@ class CameraSession(
         const val TAG = "CameraSession"
         const val FOCUS_AUTO_CANCEL_SECONDS = 3L
         const val FPS_60 = 60
+        const val COUNTDOWN_STEP_MS = 1_000L
 
         // 1:1 is cropped from the 4:3 stream by the view port.
         fun PhotoAspect.streamAspect(): Int =
