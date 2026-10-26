@@ -15,11 +15,20 @@ data class BindingAttempt(val kinds: Set<UseCaseKind>, val videoExtras: Boolean 
 fun bindingAttempts(mode: CaptureMode, livePhoto: Boolean, videoExtras: Boolean): List<BindingAttempt> {
     val video = setOf(UseCaseKind.PREVIEW, UseCaseKind.VIDEO)
     val photo = setOf(UseCaseKind.PREVIEW, UseCaseKind.IMAGE)
-    return when {
-        mode == CaptureMode.VIDEO && videoExtras ->
+    return when (mode) {
+        CaptureMode.VIDEO -> if (videoExtras) {
             listOf(BindingAttempt(video, videoExtras = true), BindingAttempt(video, videoExtras = false))
-        mode == CaptureMode.VIDEO -> listOf(BindingAttempt(video, videoExtras = true))
-        livePhoto -> listOf(BindingAttempt(photo + UseCaseKind.VIDEO), BindingAttempt(photo))
-        else -> listOf(BindingAttempt(photo))
+        } else {
+            listOf(BindingAttempt(video, videoExtras = true))
+        }
+        // A high-speed session has a fixed shape; there is nothing to fall back to.
+        CaptureMode.SLOW_MOTION -> listOf(BindingAttempt(video))
+        CaptureMode.PORTRAIT, CaptureMode.NIGHT -> listOf(BindingAttempt(photo))
+        CaptureMode.PHOTO -> if (livePhoto) {
+            listOf(BindingAttempt(photo + UseCaseKind.VIDEO), BindingAttempt(photo))
+        } else {
+            listOf(BindingAttempt(photo))
+        }
+        CaptureMode.TIMELAPSE, CaptureMode.PANORAMA -> listOf(BindingAttempt(setOf(UseCaseKind.PREVIEW)))
     }
 }

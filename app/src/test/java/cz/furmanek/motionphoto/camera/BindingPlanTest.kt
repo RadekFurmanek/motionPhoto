@@ -43,4 +43,22 @@ class BindingPlanTest {
             bindingAttempts(CaptureMode.VIDEO, livePhoto = false, videoExtras = true),
         )
     }
+
+    @Test
+    fun `slow motion binds preview and video without fallback`() {
+        assertEquals(
+            listOf(BindingAttempt(setOf(PREVIEW, VIDEO))),
+            bindingAttempts(CaptureMode.SLOW_MOTION, livePhoto = true, videoExtras = true),
+        )
+    }
+
+    @Test
+    fun `portrait and night bind preview and still capture`() {
+        listOf(CaptureMode.PORTRAIT, CaptureMode.NIGHT).forEach { mode ->
+            assertEquals(
+                listOf(BindingAttempt(setOf(PREVIEW, IMAGE))),
+                bindingAttempts(mode, livePhoto = true, videoExtras = true),
+            )
+        }
+    }
 }

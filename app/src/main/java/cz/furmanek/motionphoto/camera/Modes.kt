@@ -18,3 +18,7 @@ fun availableModes(capabilities: CameraCapabilities): List<CaptureMode> = Captur
 /** A stored mode this camera cannot do (other phone, other lens) falls back to Photo. */
 fun fallbackMode(requested: CaptureMode, available: List<CaptureMode>): CaptureMode =
     if (requested in available) requested else CaptureMode.PHOTO
+
+/** Modes whose shutter starts and stops a recording. */
+fun CaptureMode.isVideo(): Boolean =
+    this == CaptureMode.VIDEO || this == CaptureMode.SLOW_MOTION || this == CaptureMode.TIMELAPSE

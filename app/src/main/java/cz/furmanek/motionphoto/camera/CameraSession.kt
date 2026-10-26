@@ -12,6 +12,7 @@ import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState
 import androidx.camera.core.FocusMeteringAction
@@ -25,7 +26,9 @@ import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.extensions.ExtensionsManager
+import androidx.camera.extensions.ExtensionMode
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.HighSpeedVideoSessionConfig
 import androidx.camera.lifecycle.awaitInstance
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.QualitySelector
@@ -171,6 +174,8 @@ class CameraSession(
         val mirrorFrontCamera: Boolean,
         val displayRotation: Int,
         val portrait: Boolean,
+        val hdr: Boolean,
+        val slowMotionFps: Int,
     )
 
     init {
@@ -335,7 +340,7 @@ class CameraSession(
     /** The shutter of the current mode: photo (or self-timer), or start/stop a video. */
     fun onShutter() {
         when {
-            settings.mode == CaptureMode.PHOTO -> takePhoto()
+            settings.mode.isVideo().not() -> takePhoto()
             _state.value.recording != null -> stopRecording()
             else -> startRecording()
         }
@@ -350,12 +355,13 @@ class CameraSession(
     fun startRecording() {
         val current = _state.value
         val videoCapture = videoCapture
-        if (settings.mode != CaptureMode.VIDEO || current.status != SessionStatus.READY || current.busy ||
+        if (!settings.mode.isVideo() || current.status != SessionStatus.READY || current.busy ||
             current.recording != null || videoCapture == null
         ) {
             return
         }
-        val withAudio = videoRecorder.hasAudioPermission()
+        // High-speed sessions record no sound.
+        val withAudio = settings.mode == CaptureMode.VIDEO && videoRecorder.hasAudioPermission()
         val location = if (settings.saveLocation) locationProvider.lastKnownOrNull() else null
         // The service goes first: it must hold the process before the Activity can go away.
         RecordingService.start(app, withAudio)
@@ -444,6 +450,8 @@ class CameraSession(
         mirrorFrontCamera = settings.mirrorFrontCamera,
         displayRotation = target.displayRotation,
         portrait = target.portrait,
+        hdr = settings.hdr,
+        slowMotionFps = settings.slowMotionFps,
     )
 
     /** Rebinds when the binding-relevant settings changed; postponed while a capture or recording runs. */
@@ -475,10 +483,39 @@ class CameraSession(
             return
         }
         val cameraInfo = provider.getCameraInfo(selector)
-        val capabilities = CapabilityProbe.probe(provider, cameraInfo, selector, extensions(provider))
+        val extensions = extensions(provider)
+        val capabilities = CapabilityProbe.probe(provider, cameraInfo, selector, extensions)
         val lensFacing = cameraInfo.lensFacing
 
-        val photoAspect = if (key.mode == CaptureMode.VIDEO) AspectRatio.RATIO_16_9 else key.aspect.streamAspect()
+        // A stored mode or HDR this camera cannot do (other phone, front camera) is dropped; the settings
+        // change starts a new bind.
+        val mode = fallbackMode(key.mode, availableModes(capabilities))
+        val hdrAvailable = ExtensionMode.HDR in capabilities.extensionModes
+        if (mode != key.mode || (key.hdr && !hdrAvailable)) {
+            settingsRepository.update { it.copy(mode = mode, hdr = it.hdr && hdrAvailable) }
+            return
+        }
+        if (key.mode == CaptureMode.SLOW_MOTION) {
+            bindSlowMotion(key, target, provider, selector, cameraInfo, capabilities)
+            return
+        }
+        val extensionMode = when {
+            key.mode == CaptureMode.PORTRAIT -> ExtensionMode.BOKEH
+            key.mode == CaptureMode.NIGHT -> ExtensionMode.NIGHT
+            key.mode == CaptureMode.PHOTO && key.hdr -> ExtensionMode.HDR
+            else -> null
+        }
+        val bindSelector = if (extensionMode != null && extensions != null) {
+            extensions.getExtensionEnabledCameraSelector(selector, extensionMode)
+        } else {
+            selector
+        }
+
+        val photoAspect = when (key.mode) {
+            CaptureMode.VIDEO -> AspectRatio.RATIO_16_9
+            CaptureMode.PORTRAIT, CaptureMode.NIGHT -> AspectRatio.RATIO_4_3
+            else -> key.aspect.streamAspect()
+        }
         val videoQuality = if (key.mode == CaptureMode.VIDEO) {
             resolveVideoQuality(key.videoQuality, capabilities.videoQualities) ?: run {
                 fail(app.getString(R.string.camera_error_no_video))
@@ -497,8 +534,15 @@ class CameraSession(
                 .also { it.surfaceProvider = target.surfaceProvider }
             val imageCapture = if (UseCaseKind.IMAGE in kinds) {
                 ImageCapture.Builder()
-                    // Minimal shutter lag keeps a live photo's still close to its stamped moment in the clip.
-                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                    // Minimal shutter lag keeps a live photo's still close to its stamped moment in the clip;
+                    // the maker's processing (portrait, night, HDR) is about quality instead.
+                    .setCaptureMode(
+                        if (extensionMode == null) {
+                            ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                        } else {
+                            ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+                        },
+                    )
                     .setResolutionSelector(resolutionSelector(photoAspect))
                     .build()
             } else {
@@ -527,7 +571,7 @@ class CameraSession(
 
             val bound = try {
                 provider.unbindAll()
-                provider.bindToLifecycle(this, selector, group.build())
+                provider.bindToLifecycle(this, bindSelector, group.build())
             } catch (e: IllegalArgumentException) {
                 Log.w(TAG, "Binding $kinds failed", e)
                 lastError = e
@@ -544,6 +588,40 @@ class CameraSession(
         }
         Log.e(TAG, "Binding use cases failed", lastError)
         fail(app.getString(R.string.camera_error_bind, lastError?.message ?: ""))
+    }
+
+    /** High-speed recording has its own session shape: one preview and one video stream at a fixed rate. */
+    private fun bindSlowMotion(
+        key: BindingKey,
+        target: PreviewTarget,
+        provider: ProcessCameraProvider,
+        selector: CameraSelector,
+        cameraInfo: CameraInfo,
+        capabilities: CameraCapabilities,
+    ) {
+        val fps = key.slowMotionFps.takeIf { it in capabilities.slowMotionFps } ?: capabilities.slowMotionFps.max()
+        val quality = CapabilityProbe.slowMotionQuality(cameraInfo, fps) ?: run {
+            fail(app.getString(R.string.camera_error_no_video))
+            return
+        }
+        val preview = Preview.Builder().build().also { it.surfaceProvider = target.surfaceProvider }
+        val videoCapture = VideoCapture.withOutput(
+            Recorder.Builder().setQualitySelector(QualitySelector.from(quality)).build(),
+        )
+        val session = HighSpeedVideoSessionConfig(videoCapture, preview, android.util.Range(fps, fps), true)
+        val bound = try {
+            provider.unbindAll()
+            provider.bindToLifecycle(this, selector, session)
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "Binding slow motion failed", e)
+            fail(app.getString(R.string.camera_error_bind, e.message ?: ""))
+            return
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "Binding slow motion failed", e)
+            fail(app.getString(R.string.camera_error_bind, e.message ?: ""))
+            return
+        }
+        onBound(key, bound, preview, null, videoCapture, capabilities, cameraInfo.lensFacing, livePhotoAvailable = true)
     }
 
     private fun onBound(
@@ -629,7 +707,7 @@ class CameraSession(
         }
         val camera = camera ?: return
         if (camera.cameraInfo.hasFlashUnit()) {
-            camera.cameraControl.enableTorch(settings.mode == CaptureMode.VIDEO && settings.torch)
+            camera.cameraControl.enableTorch(settings.mode.isVideo() && settings.torch)
         }
     }
 
@@ -683,6 +761,7 @@ class CameraSession(
     private fun viewPort(key: BindingKey): ViewPort {
         val (width, height) = when {
             key.mode == CaptureMode.VIDEO -> 9 to 16
+            key.mode == CaptureMode.PORTRAIT || key.mode == CaptureMode.NIGHT -> 3 to 4
             key.aspect == PhotoAspect.RATIO_16_9 -> 9 to 16
             key.aspect == PhotoAspect.RATIO_1_1 -> 1 to 1
             else -> 3 to 4
