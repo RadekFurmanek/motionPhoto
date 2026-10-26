@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Motion Photo</string>
+    <string name="permission_title">Přístup k fotoaparátu</string>
+    <string name="permission_rationale">Živé fotky potřebují fotoaparát. Mikrofon je volitelný – bez něj se video uloží bez zvuku.</string>
+    <string name="permission_grant">Povolit</string>
+    <string name="permission_open_settings">Otevřít nastavení</string>
+    <string name="shutter">Vyfotit</string>
+    <string name="switch_camera">Přepnout fotoaparát</string>
+    <string name="saved">Živá fotka uložena</string>
+    <string name="view">Zobrazit</string>
+    <string name="error_capture">Pořízení se nezdařilo: %1$s</string>
+    <string name="error_camera">Fotoaparát nelze spustit: %1$s</string>
+    <string name="zoom_ratio">%1$.1f×</string>
+</resources>
