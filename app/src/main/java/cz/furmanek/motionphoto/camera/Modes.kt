@@ -1,6 +1,7 @@
 package cz.furmanek.motionphoto.camera
 
 import androidx.camera.extensions.ExtensionMode
+import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
 
 /** Modes the bar offers for this camera, in bar order. Only modes the app implements and the camera supports. */
@@ -22,3 +23,20 @@ fun fallbackMode(requested: CaptureMode, available: List<CaptureMode>): CaptureM
 /** Modes whose shutter starts and stops a recording. */
 fun CaptureMode.isVideo(): Boolean =
     this == CaptureMode.VIDEO || this == CaptureMode.SLOW_MOTION || this == CaptureMode.TIMELAPSE
+
+/**
+ * High-speed sessions run at fixed rates; [ranges] (lower to upper) must contain exactly [fps]..[fps].
+ * "Upper bound at least fps" would wrongly accept 120 on a camera that only offers 240.
+ */
+fun supportsFixedRate(ranges: Collection<Pair<Int, Int>>, fps: Int): Boolean = (fps to fps) in ranges
+
+/**
+ * Settings to fall back to when binding the current mode failed on this camera: maker modes and slow motion
+ * fall back to plain Photo, HDR is switched off. Null when there is no simpler setup to try.
+ */
+fun afterBindFailure(settings: CameraSettings): CameraSettings? = when {
+    settings.mode in setOf(CaptureMode.SLOW_MOTION, CaptureMode.PORTRAIT, CaptureMode.NIGHT) ->
+        settings.copy(mode = CaptureMode.PHOTO)
+    settings.mode == CaptureMode.PHOTO && settings.hdr -> settings.copy(hdr = false)
+    else -> null
+}
