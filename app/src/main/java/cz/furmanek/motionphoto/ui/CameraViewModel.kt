@@ -72,7 +72,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun zoomBy(scaleFactor: Float) = session.zoomBy(scaleFactor)
 
-    fun setZoom(ratio: Float) = session.setZoom(ratio)
+    fun setZoom(ratio: Float) = session.animateZoomTo(ratio)
 
     fun setExposureIndex(index: Int) = session.setExposureIndex(index)
 

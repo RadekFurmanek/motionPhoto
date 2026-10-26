@@ -141,6 +141,7 @@ class CameraSession(
     private var bindJob: Job? = null
     private var photoJob: Job? = null
     private var cameraObservers: Job? = null
+    private var zoomJob: Job? = null
     private val uiVisibility = UiVisibility()
     private val uiVisible: Boolean get() = uiVisibility.anyVisible
     private var selectedBackCameraId: String? = null
@@ -222,15 +223,33 @@ class CameraSession(
         requestBind()
     }
 
-    fun setZoom(ratio: Float) {
+    /** Glides to [ratio] (a zoom preset), one zoom step per frame. */
+    fun animateZoomTo(ratio: Float) {
         val camera = camera ?: return
         val zoom = camera.cameraInfo.zoomState.value ?: return
-        requestedZoomRatio = ratio.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio)
-        camera.cameraControl.setZoomRatio(requestedZoomRatio)
+        val target = ratio.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio)
+        zoomJob?.cancel()
+        zoomJob = scope.launch {
+            for (step in zoomAnimationSteps(requestedZoomRatio, target, ZOOM_ANIMATION_MS, ZOOM_FRAME_MS)) {
+                applyZoom(camera, step)
+                delay(ZOOM_FRAME_MS)
+            }
+        }
     }
 
-    /** Multiplies the zoom by [scaleFactor]; chains from the last requested ratio, which leads fast pinches. */
-    fun zoomBy(scaleFactor: Float) = setZoom(requestedZoomRatio * scaleFactor)
+    /** Multiplies the zoom by [scaleFactor] (pinch); stops a running glide so the fingers win. */
+    fun zoomBy(scaleFactor: Float) {
+        val camera = camera ?: return
+        val zoom = camera.cameraInfo.zoomState.value ?: return
+        zoomJob?.cancel()
+        // Chains from the last requested ratio, which leads the reported one during fast pinches.
+        applyZoom(camera, (requestedZoomRatio * scaleFactor).coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio))
+    }
+
+    private fun applyZoom(camera: Camera, ratio: Float) {
+        requestedZoomRatio = ratio
+        camera.cameraControl.setZoomRatio(ratio)
+    }
 
     fun focusAt(x: Float, y: Float) {
         val camera = camera ?: return
@@ -535,6 +554,7 @@ class CameraSession(
         livePhotoAvailable: Boolean,
     ) {
         val sameCamera = boundKey?.let { it.lensFacing == key.lensFacing && it.backCameraId == key.backCameraId } == true
+        zoomJob?.cancel()
         this.camera = bound
         this.preview = preview
         this.imageCapture = imageCapture
@@ -681,6 +701,8 @@ class CameraSession(
         const val FPS_60 = 60
         const val COUNTDOWN_STEP_MS = 1_000L
         const val EVENT_BUFFER = 64
+        const val ZOOM_ANIMATION_MS = 300L
+        const val ZOOM_FRAME_MS = 16L
 
         // 1:1 is cropped from the 4:3 stream by the view port.
         fun PhotoAspect.streamAspect(): Int =
