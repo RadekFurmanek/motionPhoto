@@ -299,7 +299,7 @@ Rozvržení (tmavé, styl Google Camera): nahoře `QuickSettingsBar` (blesk/sví
 Chování: s `EXTRA_OUTPUT` zapiš výsledek do té URI (fotku jako JPEG, video jako MP4 přes `FileDescriptorOutputOptions`) a vrať `RESULT_OK`; bez `EXTRA_OUTPUT` u fotky vrať v `data` extra `"data"` zmenšený `Bitmap` (max 512 px), u videa ulož do MediaStore a vrať jeho URI. Zrušení → `RESULT_CANCELED`. Nic se neukládá do galerie, když je dané `EXTRA_OUTPUT`.
 
 - [ ] **Step 1: Implementuj.**
-- [ ] **Step 2: Emulátor** — `adb shell am start -W -a android.media.action.IMAGE_CAPTURE -n cz.furmanek.motionphoto/.CaptureIntentActivity` → otevře se zjednodušené UI; vyfocení + Použít ukončí aktivitu bez pádu (`adb logcat -d | grep AndroidRuntime` prázdné) a v galerii nepřibude soubor jen tehdy, když bylo dané `EXTRA_OUTPUT` (bez něj se fotka vrací jako náhled, také bez zápisu do galerie). Totéž pro `android.media.action.VIDEO_CAPTURE`: video se uloží do `content://media/external/video/media`.
+- [ ] **Step 2: Emulátor** — `adb shell am start -W -a android.media.action.IMAGE_CAPTURE -n cz.furmanek.motionphoto/.CaptureIntentActivity` → otevře se zjednodušené UI; vyfocení + Použít ukončí aktivitu bez pádu (`adb logcat -d | grep AndroidRuntime` prázdné) a do galerie (`content://media/external/images/media`) nepřibude žádný soubor. Totéž pro `android.media.action.VIDEO_CAPTURE`: video se uloží do `content://media/external/video/media`.
 - [ ] **Step 3: Commit** — `feat: handle IMAGE_CAPTURE and VIDEO_CAPTURE intents`
 
 ### Task 9: Vydání 0.2.0
