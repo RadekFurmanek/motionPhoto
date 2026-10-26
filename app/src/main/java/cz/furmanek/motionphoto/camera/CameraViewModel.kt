@@ -37,7 +37,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.asFlow
 import androidx.lifecycle.viewModelScope
-import cz.furmanek.motionphoto.motionphoto.MotionPhotoStore
+import cz.furmanek.motionphoto.media.MediaStoreWriter
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -86,7 +86,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val events: Flow<CameraEvent> = _events.receiveAsFlow()
 
     private val mainExecutor = ContextCompat.getMainExecutor(application)
-    private val store = MotionPhotoStore(application.contentResolver)
+    private val store = MediaStoreWriter(application.contentResolver)
 
     private val preview = Preview.Builder()
         .setResolutionSelector(resolutionSelector4by3())
@@ -250,7 +250,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         try {
             val presentationTimestampUs = recordClipWithStill(videoFile, stillFile)
             return withContext(Dispatchers.IO) {
-                store.save(stillFile, videoFile, presentationTimestampUs, capturedAtMillis)
+                store.saveMotionPhoto(stillFile, videoFile, presentationTimestampUs, capturedAtMillis, location = null)
             }
         } finally {
             withContext(NonCancellable + Dispatchers.IO) {
