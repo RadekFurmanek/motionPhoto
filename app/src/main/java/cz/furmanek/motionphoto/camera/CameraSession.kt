@@ -24,6 +24,7 @@ import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.lifecycle.awaitInstance
 import androidx.camera.video.FallbackStrategy
@@ -132,6 +133,8 @@ class CameraSession(
     private var settings = CameraSettings()
     private var settingsLoaded = false
     private var provider: ProcessCameraProvider? = null
+    private var extensionsManager: ExtensionsManager? = null
+    private var extensionsLoaded = false
     private var camera: Camera? = null
     private var preview: Preview? = null
     private var imageCapture: ImageCapture? = null
@@ -472,7 +475,7 @@ class CameraSession(
             return
         }
         val cameraInfo = provider.getCameraInfo(selector)
-        val capabilities = CapabilityProbe.probe(provider, cameraInfo)
+        val capabilities = CapabilityProbe.probe(provider, cameraInfo, selector, extensions(provider))
         val lensFacing = cameraInfo.lensFacing
 
         val photoAspect = if (key.mode == CaptureMode.VIDEO) AspectRatio.RATIO_16_9 else key.aspect.streamAspect()
@@ -579,6 +582,22 @@ class CameraSession(
                 },
             )
         }
+    }
+
+    /** Loaded once; a phone without maker Extensions (or a failure loading them) yields null. */
+    private suspend fun extensions(provider: ProcessCameraProvider): ExtensionsManager? {
+        if (!extensionsLoaded) {
+            extensionsManager = try {
+                ExtensionsManager.getInstance(app, provider)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Camera extensions unavailable", e)
+                null
+            }
+            extensionsLoaded = true
+        }
+        return extensionsManager
     }
 
     private fun observeCamera(camera: Camera) {
