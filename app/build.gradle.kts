@@ -70,6 +70,10 @@ dependencies {
 
     implementation(libs.adobe.xmpcore)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.androidx.datastore.preferences)
+    implementation(libs.androidx.exifinterface)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.androidx.datastore.preferences.core)
 }
