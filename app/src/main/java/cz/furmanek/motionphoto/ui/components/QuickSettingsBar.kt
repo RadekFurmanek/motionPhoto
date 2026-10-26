@@ -45,6 +45,7 @@ import cz.furmanek.motionphoto.settings.TimerSetting
 import cz.furmanek.motionphoto.settings.effectiveLivePhoto
 import cz.furmanek.motionphoto.settings.withHdr
 import cz.furmanek.motionphoto.settings.withLivePhoto
+import cz.furmanek.motionphoto.timelapse.TIMELAPSE_INTERVALS_MS
 
 /**
  * Settings for the current mode. Only what [capabilities] supports is shown; [locked] (capture or recording
@@ -134,7 +135,17 @@ fun QuickSettingsBar(
                     }
                 }
             }
-            CaptureMode.TIMELAPSE, CaptureMode.PANORAMA -> Unit
+            CaptureMode.TIMELAPSE -> {
+                if (hasFlash) TorchButton(settings, onUpdate)
+                BarText(
+                    stringResource(R.string.timelapse_interval_value, formatSeconds(settings.timelapseIntervalMs)),
+                    stringResource(R.string.timelapse_interval),
+                    enabled = !locked,
+                ) {
+                    onUpdate { it.copy(timelapseIntervalMs = TIMELAPSE_INTERVALS_MS.next(it.timelapseIntervalMs)) }
+                }
+            }
+            CaptureMode.PANORAMA -> Unit
         }
         BarIcon(Icons.Filled.Settings, stringResource(R.string.settings), enabled = !locked, onClick = onOpenSettings)
     }
@@ -213,3 +224,7 @@ private fun barColor(enabled: Boolean, highlighted: Boolean): Color = when {
     highlighted -> Color(0xFFFFD54F)
     else -> Color.White
 }
+
+/** "0,5" / "1" / "10": seconds the Czech way, without a trailing ",0". */
+private fun formatSeconds(millis: Long): String =
+    if (millis % 1000 == 0L) (millis / 1000).toString() else (millis / 1000.0).toString().replace('.', ',')

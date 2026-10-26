@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import androidx.annotation.StringRes
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -28,7 +29,12 @@ class RecordingService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val withAudio = intent.getBooleanExtra(EXTRA_WITH_AUDIO, false)
-                ServiceCompat.startForeground(this, NOTIFICATION_ID, recordingNotification(this), foregroundServiceTypes(withAudio))
+                val title = if (intent.getBooleanExtra(EXTRA_TIMELAPSE, false)) {
+                    R.string.timelapse_notification_title
+                } else {
+                    R.string.recording_notification_title
+                }
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, recordingNotification(this, title), foregroundServiceTypes(withAudio))
             }
             ACTION_STOP_RECORDING -> (application as MotionPhotoApp).cameraSession.stopRecording()
             ACTION_STOP_SERVICE -> {
@@ -44,16 +50,20 @@ class RecordingService : Service() {
         private const val ACTION_STOP_RECORDING = "cz.furmanek.motionphoto.action.STOP_RECORDING"
         private const val ACTION_STOP_SERVICE = "cz.furmanek.motionphoto.action.STOP_RECORDING_SERVICE"
         private const val EXTRA_WITH_AUDIO = "with_audio"
+        private const val EXTRA_TIMELAPSE = "timelapse"
         private const val CHANNEL_RECORDING = "recording"
         private const val CHANNEL_RESULTS = "recording_results"
         private const val NOTIFICATION_ID = 1
         private const val RESULT_NOTIFICATION_ID = 2
 
-        fun start(context: Context, withAudio: Boolean) {
+        fun start(context: Context, withAudio: Boolean, timelapse: Boolean = false) {
             ensureChannels(context)
             ContextCompat.startForegroundService(
                 context,
-                Intent(context, RecordingService::class.java).setAction(ACTION_START).putExtra(EXTRA_WITH_AUDIO, withAudio),
+                Intent(context, RecordingService::class.java)
+                    .setAction(ACTION_START)
+                    .putExtra(EXTRA_WITH_AUDIO, withAudio)
+                    .putExtra(EXTRA_TIMELAPSE, timelapse),
             )
         }
 
@@ -91,7 +101,7 @@ class RecordingService : Service() {
             }
         }
 
-        private fun recordingNotification(context: Context): Notification {
+        private fun recordingNotification(context: Context, @StringRes title: Int): Notification {
             val stop = PendingIntent.getService(
                 context,
                 0,
@@ -100,7 +110,7 @@ class RecordingService : Service() {
             )
             return NotificationCompat.Builder(context, CHANNEL_RECORDING)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
-                .setContentTitle(context.getString(R.string.recording_notification_title))
+                .setContentTitle(context.getString(title))
                 .setUsesChronometer(true)
                 .setWhen(System.currentTimeMillis())
                 .setOngoing(true)

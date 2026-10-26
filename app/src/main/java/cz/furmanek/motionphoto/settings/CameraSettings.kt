@@ -34,6 +34,7 @@ data class CameraSettings(
     val mirrorFrontCamera: Boolean = false,
     val slowMotionFps: Int = 120,
     val hdr: Boolean = false,
+    val timelapseIntervalMs: Long = 1000L,
 )
 
 /**

@@ -69,6 +69,7 @@ import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cz.furmanek.motionphoto.R
+import cz.furmanek.motionphoto.camera.RecordingKind
 import cz.furmanek.motionphoto.camera.SessionEvent
 import cz.furmanek.motionphoto.camera.SessionStatus
 import cz.furmanek.motionphoto.camera.availableModes
@@ -77,6 +78,7 @@ import cz.furmanek.motionphoto.camera.zoomPresets
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
+import cz.furmanek.motionphoto.timelapse.timelapseOutputDurationMs
 import cz.furmanek.motionphoto.settings.effectiveLivePhoto
 import cz.furmanek.motionphoto.ui.components.ExposureSlider
 import cz.furmanek.motionphoto.ui.components.GridOverlay
@@ -229,7 +231,14 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 onUpdate = viewModel::updateSettings,
                 onOpenSettings = { showSettings = true },
             )
-            recording?.let { RecordingIndicator(it.durationNanos, it.paused, Modifier.padding(top = 8.dp)) }
+            recording?.let {
+                RecordingIndicator(
+                    it.durationNanos,
+                    it.paused,
+                    Modifier.padding(top = 8.dp),
+                    outputMillis = if (it.kind == RecordingKind.TIMELAPSE) timelapseOutputDurationMs(it.frames) else null,
+                )
+            }
             SnackbarHost(snackbarHostState)
         }
 
@@ -328,7 +337,10 @@ private fun BottomControls(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (recording != null) {
+            if (recording != null && recording.kind == RecordingKind.TIMELAPSE) {
+                // A time-lapse has nothing to pause: stopping keeps what was taken.
+                Spacer(Modifier.size(56.dp))
+            } else if (recording != null) {
                 RoundButton(
                     onClick = if (recording.paused) viewModel::resumeRecording else viewModel::pauseRecording,
                 ) {

@@ -23,7 +23,7 @@ fun PhotoAspect.labelRes(): Int = when (this) {
 
 /** Width / height of the saved frame as shown in portrait. */
 fun outputAspect(mode: CaptureMode, aspect: PhotoAspect): Float = when {
-    mode == CaptureMode.VIDEO || mode == CaptureMode.SLOW_MOTION -> 9f / 16f
+    mode == CaptureMode.VIDEO || mode == CaptureMode.SLOW_MOTION || mode == CaptureMode.TIMELAPSE -> 9f / 16f
     mode == CaptureMode.PORTRAIT || mode == CaptureMode.NIGHT -> 3f / 4f
     aspect == PhotoAspect.RATIO_16_9 -> 9f / 16f
     aspect == PhotoAspect.RATIO_1_1 -> 1f

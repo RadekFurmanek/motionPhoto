@@ -57,6 +57,7 @@ class SettingsRepositoryTest {
                 grid = true,
                 slowMotionFps = 240,
                 hdr = true,
+                timelapseIntervalMs = 5000,
             )
         }
 
@@ -72,6 +73,7 @@ class SettingsRepositoryTest {
         assertEquals(true, reloaded.grid)
         assertEquals(240, reloaded.slowMotionFps)
         assertEquals(true, reloaded.hdr)
+        assertEquals(5000L, reloaded.timelapseIntervalMs)
     }
 
     @Test

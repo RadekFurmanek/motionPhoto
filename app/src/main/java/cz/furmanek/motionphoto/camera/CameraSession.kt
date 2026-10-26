@@ -4,6 +4,7 @@ import android.app.Application
 import android.media.MediaActionSound
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import android.util.Rational
 import android.view.Surface
@@ -16,6 +17,7 @@ import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.MeteringPointFactory
 import androidx.camera.core.MirrorMode
@@ -74,7 +76,16 @@ import kotlinx.coroutines.withContext
 
 enum class SessionStatus { CLOSED, OPENING, READY, ERROR }
 
-data class RecordingState(val durationNanos: Long, val paused: Boolean, val withAudio: Boolean)
+enum class RecordingKind { VIDEO, TIMELAPSE }
+
+data class RecordingState(
+    val durationNanos: Long,
+    val paused: Boolean,
+    val withAudio: Boolean,
+    val kind: RecordingKind = RecordingKind.VIDEO,
+    /** Time-lapse frames recorded so far. */
+    val frames: Int = 0,
+)
 
 data class SessionState(
     val status: SessionStatus = SessionStatus.CLOSED,
@@ -142,6 +153,9 @@ class CameraSession(
     private var preview: Preview? = null
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
+    private var imageAnalysis: ImageAnalysis? = null
+    private val timelapseRecorder = TimelapseRecorder(app)
+    private var timelapseClock: Job? = null
     private var target: PreviewTarget? = null
     private var boundKey: BindingKey? = null
     private var bindJob: Job? = null
@@ -149,6 +163,7 @@ class CameraSession(
     private var cameraObservers: Job? = null
     private var zoomJob: Job? = null
     private val uiVisibility = UiVisibility()
+    private val discardingPreview = DiscardingSurfaceProvider()
     private val uiVisible: Boolean get() = uiVisibility.anyVisible
     private var selectedBackCameraId: String? = null
     private var targetRotation = Surface.ROTATION_0
@@ -179,7 +194,10 @@ class CameraSession(
     )
 
     init {
-        scope.launch(Dispatchers.IO) { PhotoCapture.deleteTempFiles(app.cacheDir) }
+        scope.launch(Dispatchers.IO) {
+            PhotoCapture.deleteTempFiles(app.cacheDir)
+            TimelapseRecorder.deleteTempFiles(app.cacheDir)
+        }
         scope.launch {
             val latest = withContext(Dispatchers.IO) { runCatching { writer.latestOwnCapture() }.getOrNull() }
             if (latest != null) _state.update { it.copy(lastCapture = it.lastCapture ?: latest) }
@@ -209,11 +227,12 @@ class CameraSession(
     fun detachPreview(surfaceProvider: Preview.SurfaceProvider) {
         if (target?.surfaceProvider !== surfaceProvider) return
         target = null
-        preview?.surfaceProvider = null
+        preview?.surfaceProvider = discardingPreview.takeIf { _state.value.recording != null }
     }
 
     fun onUiVisible(visible: Boolean) {
         if (visible) uiVisibility.shown() else uiVisibility.hidden()
+        routePreview()
         // Another screen (capture for another app) may have bound the camera meanwhile, which unbinds ours.
         val preview = preview
         if (visible && preview != null && provider?.isBound(preview) == false) {
@@ -222,6 +241,16 @@ class CameraSession(
         }
         updateLifecycle()
         if (visible) requestBind()
+    }
+
+    /**
+     * Sends preview frames to the screen while it shows, and to [discardingPreview] while a recording runs
+     * in the background: the screen's surface is gone then, and a stream without a consumer stalls the camera.
+     */
+    private fun routePreview() {
+        val preview = preview ?: return
+        val provider = if (uiVisible) target?.surfaceProvider else discardingPreview.takeIf { _state.value.recording != null }
+        if (preview.surfaceProvider !== provider) preview.surfaceProvider = provider
     }
 
     /** Switches to a separately exposed back camera (ultra-wide, telephoto); null returns to the default one. */
@@ -354,12 +383,14 @@ class CameraSession(
 
     fun startRecording() {
         val current = _state.value
-        val videoCapture = videoCapture
-        if (!settings.mode.isVideo() || current.status != SessionStatus.READY || current.busy ||
-            current.recording != null || videoCapture == null
-        ) {
+        if (!settings.mode.isVideo() || current.status != SessionStatus.READY || current.busy || current.recording != null) {
             return
         }
+        if (settings.mode == CaptureMode.TIMELAPSE) {
+            startTimelapse()
+            return
+        }
+        val videoCapture = videoCapture ?: return
         // High-speed sessions record no sound.
         val withAudio = settings.mode == CaptureMode.VIDEO && videoRecorder.hasAudioPermission()
         val location = if (settings.saveLocation) locationProvider.lastKnownOrNull() else null
@@ -382,7 +413,78 @@ class CameraSession(
 
     fun resumeRecording() = videoRecorder.resume()
 
-    fun stopRecording() = videoRecorder.stop()
+    fun stopRecording() {
+        if (_state.value.recording?.kind == RecordingKind.TIMELAPSE) stopTimelapse() else videoRecorder.stop()
+    }
+
+    private fun startTimelapse() {
+        val analysis = imageAnalysis ?: return
+        // No sound in a time-lapse, so the service only needs the camera type.
+        RecordingService.start(app, withAudio = false, timelapse = true)
+        playSound(MediaActionSound.START_VIDEO_RECORDING)
+        timelapseRecorder.start(analysis, settings.timelapseIntervalMs) { frames ->
+            updateRecording { it.copy(frames = frames) }
+        }
+        val startedAtNs = SystemClock.elapsedRealtimeNanos()
+        val startedAtMillis = System.currentTimeMillis()
+        timelapseStartedAtMillis = startedAtMillis
+        timelapseClock = scope.launch {
+            while (true) {
+                updateRecording { it.copy(durationNanos = SystemClock.elapsedRealtimeNanos() - startedAtNs) }
+                delay(TIMELAPSE_CLOCK_MS)
+            }
+        }
+        _state.update {
+            it.copy(recording = RecordingState(0, paused = false, withAudio = false, kind = RecordingKind.TIMELAPSE))
+        }
+        updateLifecycle()
+    }
+
+    private var timelapseStartedAtMillis = 0L
+    private var timelapseStopping = false
+
+    private fun stopTimelapse() {
+        if (timelapseStopping) return
+        timelapseStopping = true
+        timelapseClock?.cancel()
+        scope.launch {
+            try {
+                val file = timelapseRecorder.stop()
+                if (file == null) {
+                    reportRecordingProblem(app.getString(R.string.timelapse_empty))
+                } else {
+                    val uri = withContext(Dispatchers.IO) {
+                        try {
+                            writer.saveVideoFile(file, timelapseStartedAtMillis)
+                        } finally {
+                            file.delete()
+                        }
+                    }
+                    _state.update { it.copy(lastCapture = uri) }
+                    _events.tryEmit(SessionEvent.Saved(SavedMedia(uri, MediaKind.VIDEO)))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Saving the time-lapse failed", e)
+                reportRecordingProblem(app.getString(R.string.recording_failed))
+            } finally {
+                timelapseStopping = false
+                _state.update { it.copy(recording = null) }
+                RecordingService.stop(app)
+                playSound(MediaActionSound.STOP_VIDEO_RECORDING)
+                updateLifecycle()
+                applyTargetRotation()
+                applyCameraControls()
+                requestBind()
+            }
+        }
+    }
+
+    private fun reportRecordingProblem(message: String) {
+        _events.tryEmit(SessionEvent.CaptureFailed(message))
+        if (!uiVisible) RecordingService.notifyResult(app, message)
+    }
 
     private fun onRecordEvent(event: VideoRecordEvent) {
         when (event) {
@@ -512,7 +614,7 @@ class CameraSession(
         }
 
         val photoAspect = when (key.mode) {
-            CaptureMode.VIDEO -> AspectRatio.RATIO_16_9
+            CaptureMode.VIDEO, CaptureMode.TIMELAPSE -> AspectRatio.RATIO_16_9
             CaptureMode.PORTRAIT, CaptureMode.NIGHT -> AspectRatio.RATIO_4_3
             else -> key.aspect.streamAspect()
         }
@@ -565,9 +667,19 @@ class CameraSession(
                     mirror = key.mirrorFrontCamera,
                 )
             }
+            val imageAnalysis = if (UseCaseKind.ANALYSIS in kinds) {
+                ImageAnalysis.Builder()
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setResolutionSelector(analysisResolution(photoAspect))
+                    .build()
+            } else {
+                null
+            }
             val group = UseCaseGroup.Builder().setViewPort(viewPort(key)).addUseCase(preview)
             imageCapture?.let(group::addUseCase)
             videoCapture?.let(group::addUseCase)
+            imageAnalysis?.let(group::addUseCase)
 
             val bound = try {
                 provider.unbindAll()
@@ -583,6 +695,7 @@ class CameraSession(
             }
             // A live photo that had to drop its video stream is not available on this camera.
             val livePhotoAvailable = !(key.mode == CaptureMode.PHOTO && key.livePhoto && index > 0)
+            this.imageAnalysis = imageAnalysis
             onBound(key, bound, preview, imageCapture, videoCapture, capabilities, lensFacing, livePhotoAvailable)
             return
         }
@@ -634,6 +747,7 @@ class CameraSession(
             fallBackOrFail(e)
             return
         }
+        imageAnalysis = null
         onBound(key, bound, preview, null, videoCapture, capabilities, cameraInfo.lensFacing, livePhotoAvailable = true)
     }
 
@@ -704,6 +818,8 @@ class CameraSession(
                     val error = cameraState.error
                     if (error != null) {
                         _state.update { it.copy(status = SessionStatus.ERROR, errorMessage = describe(error.code)) }
+                        // The Recorder ends a video on its own; a time-lapse keeps what it has.
+                        if (_state.value.recording?.kind == RecordingKind.TIMELAPSE) stopTimelapse()
                     } else if (cameraState.type == CameraState.Type.OPEN) {
                         _state.update { it.copy(status = SessionStatus.READY, errorMessage = null) }
                     }
@@ -726,6 +842,7 @@ class CameraSession(
 
     private fun applyTargetRotation() {
         imageCapture?.targetRotation = targetRotation
+        imageAnalysis?.targetRotation = targetRotation
         videoCapture?.targetRotation = targetRotation
     }
 
@@ -773,7 +890,7 @@ class CameraSession(
 
     private fun viewPort(key: BindingKey): ViewPort {
         val (width, height) = when {
-            key.mode == CaptureMode.VIDEO -> 9 to 16
+            key.mode == CaptureMode.VIDEO || key.mode == CaptureMode.TIMELAPSE -> 9 to 16
             key.mode == CaptureMode.PORTRAIT || key.mode == CaptureMode.NIGHT -> 3 to 4
             key.aspect == PhotoAspect.RATIO_16_9 -> 9 to 16
             key.aspect == PhotoAspect.RATIO_1_1 -> 1 to 1
@@ -811,6 +928,7 @@ class CameraSession(
         const val FOCUS_AUTO_CANCEL_SECONDS = 3L
         const val FPS_60 = 60
         const val COUNTDOWN_STEP_MS = 1_000L
+        const val TIMELAPSE_CLOCK_MS = 500L
         const val EVENT_BUFFER = 64
         const val ZOOM_ANIMATION_MS = 300L
         const val ZOOM_FRAME_MS = 16L
@@ -818,6 +936,14 @@ class CameraSession(
         // 1:1 is cropped from the 4:3 stream by the view port.
         fun PhotoAspect.streamAspect(): Int =
             if (this == PhotoAspect.RATIO_16_9) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
+
+        /** Analysis frames near 1080p: enough for a time-lapse, cheap to convert every interval. */
+        fun analysisResolution(aspect: Int): ResolutionSelector = ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy(aspect, AspectRatioStrategy.FALLBACK_RULE_AUTO))
+            .setResolutionStrategy(
+                ResolutionStrategy(android.util.Size(1920, 1080), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER),
+            )
+            .build()
 
         fun resolutionSelector(aspect: Int): ResolutionSelector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy(aspect, AspectRatioStrategy.FALLBACK_RULE_AUTO))

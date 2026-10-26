@@ -78,4 +78,8 @@
     <string name="slow_motion_fps">%1$d fps</string>
     <string name="settings_section_slow_motion">Zpomalené video</string>
     <string name="mode_unavailable">Tento režim se na fotoaparátu nepodařilo spustit, přepínám na Foto</string>
+    <string name="timelapse_empty">Časosběr nestihl zachytit žádný snímek, nic se neuložilo</string>
+    <string name="timelapse_interval">Interval časosběru</string>
+    <string name="timelapse_interval_value">%1$s s</string>
+    <string name="timelapse_notification_title">Natáčí se časosběr</string>
 </resources>

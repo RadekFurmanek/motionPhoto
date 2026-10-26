@@ -6,6 +6,7 @@ import cz.furmanek.motionphoto.settings.CaptureMode.NIGHT
 import cz.furmanek.motionphoto.settings.CaptureMode.PHOTO
 import cz.furmanek.motionphoto.settings.CaptureMode.PORTRAIT
 import cz.furmanek.motionphoto.settings.CaptureMode.SLOW_MOTION
+import cz.furmanek.motionphoto.settings.CaptureMode.TIMELAPSE
 import cz.furmanek.motionphoto.settings.CaptureMode.VIDEO
 import cz.furmanek.motionphoto.settings.VideoQualitySetting
 import org.junit.Assert.assertEquals
@@ -30,21 +31,21 @@ class ModesTest {
     )
 
     @Test
-    fun `plain camera offers video and photo`() {
-        assertEquals(listOf(VIDEO, PHOTO), availableModes(caps()))
+    fun `plain camera offers timelapse, video and photo`() {
+        assertEquals(listOf(TIMELAPSE, VIDEO, PHOTO), availableModes(caps()))
     }
 
     @Test
     fun `slow motion and extension modes appear in bar order`() {
         assertEquals(
-            listOf(SLOW_MOTION, VIDEO, PHOTO, PORTRAIT, NIGHT),
+            listOf(TIMELAPSE, SLOW_MOTION, VIDEO, PHOTO, PORTRAIT, NIGHT),
             availableModes(caps(slowMotionFps = setOf(120), extensionModes = setOf(ExtensionMode.BOKEH, ExtensionMode.NIGHT))),
         )
     }
 
     @Test
     fun `hdr alone adds no mode`() {
-        assertEquals(listOf(VIDEO, PHOTO), availableModes(caps(extensionModes = setOf(ExtensionMode.HDR))))
+        assertEquals(listOf(TIMELAPSE, VIDEO, PHOTO), availableModes(caps(extensionModes = setOf(ExtensionMode.HDR))))
     }
 
     @Test

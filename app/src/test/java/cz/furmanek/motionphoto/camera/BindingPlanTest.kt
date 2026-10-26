@@ -1,5 +1,6 @@
 package cz.furmanek.motionphoto.camera
 
+import cz.furmanek.motionphoto.camera.UseCaseKind.ANALYSIS
 import cz.furmanek.motionphoto.camera.UseCaseKind.IMAGE
 import cz.furmanek.motionphoto.camera.UseCaseKind.PREVIEW
 import cz.furmanek.motionphoto.camera.UseCaseKind.VIDEO
@@ -60,5 +61,13 @@ class BindingPlanTest {
                 bindingAttempts(mode, livePhoto = true, videoExtras = true),
             )
         }
+    }
+
+    @Test
+    fun `timelapse binds preview and frame analysis`() {
+        assertEquals(
+            listOf(BindingAttempt(setOf(PREVIEW, ANALYSIS))),
+            bindingAttempts(CaptureMode.TIMELAPSE, livePhoto = true, videoExtras = true),
+        )
     }
 }

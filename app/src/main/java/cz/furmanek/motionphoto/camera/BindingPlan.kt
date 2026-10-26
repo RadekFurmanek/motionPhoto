@@ -2,7 +2,7 @@ package cz.furmanek.motionphoto.camera
 
 import cz.furmanek.motionphoto.settings.CaptureMode
 
-enum class UseCaseKind { PREVIEW, IMAGE, VIDEO }
+enum class UseCaseKind { PREVIEW, IMAGE, VIDEO, ANALYSIS }
 
 /** One binding to try; [videoExtras] allows 60 fps and stabilization on the video stream. */
 data class BindingAttempt(val kinds: Set<UseCaseKind>, val videoExtras: Boolean = false)
@@ -29,6 +29,7 @@ fun bindingAttempts(mode: CaptureMode, livePhoto: Boolean, videoExtras: Boolean)
         } else {
             listOf(BindingAttempt(photo))
         }
-        CaptureMode.TIMELAPSE, CaptureMode.PANORAMA -> listOf(BindingAttempt(setOf(UseCaseKind.PREVIEW)))
+        CaptureMode.TIMELAPSE -> listOf(BindingAttempt(setOf(UseCaseKind.PREVIEW, UseCaseKind.ANALYSIS)))
+        CaptureMode.PANORAMA -> listOf(BindingAttempt(setOf(UseCaseKind.PREVIEW)))
     }
 }

@@ -12,7 +12,8 @@ fun availableModes(capabilities: CameraCapabilities): List<CaptureMode> = Captur
         CaptureMode.SLOW_MOTION -> capabilities.slowMotionFps.isNotEmpty()
         CaptureMode.PORTRAIT -> ExtensionMode.BOKEH in capabilities.extensionModes
         CaptureMode.NIGHT -> ExtensionMode.NIGHT in capabilities.extensionModes
-        CaptureMode.TIMELAPSE, CaptureMode.PANORAMA -> false
+        CaptureMode.TIMELAPSE -> true
+        CaptureMode.PANORAMA -> false
     }
 }
 

@@ -24,8 +24,9 @@ fun formatDuration(durationNanos: Long): String {
     return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, seconds) else "%02d:%02d".format(minutes, seconds)
 }
 
+/** [outputMillis] (time-lapse) adds the length of the resulting video: "02:10 → 0:04". */
 @Composable
-fun RecordingIndicator(durationNanos: Long, paused: Boolean, modifier: Modifier = Modifier) {
+fun RecordingIndicator(durationNanos: Long, paused: Boolean, modifier: Modifier = Modifier, outputMillis: Long? = null) {
     Row(
         modifier = modifier
             .clip(CircleShape)
@@ -40,6 +41,10 @@ fun RecordingIndicator(durationNanos: Long, paused: Boolean, modifier: Modifier 
                 .clip(CircleShape)
                 .background(if (paused) Color.Gray else Color(0xFFE53935)),
         )
-        Text(formatDuration(durationNanos), color = Color.White)
+        val elapsed = formatDuration(durationNanos)
+        Text(
+            if (outputMillis == null) elapsed else "$elapsed → ${formatDuration(TimeUnit.MILLISECONDS.toNanos(outputMillis))}",
+            color = Color.White,
+        )
     }
 }

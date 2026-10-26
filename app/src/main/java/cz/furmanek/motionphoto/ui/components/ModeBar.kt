@@ -15,7 +15,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -68,6 +71,8 @@ fun ModeBar(
                         else -> Color.Gray
                     },
                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                    // Readable over bright scenes where the preview runs behind the bar (16:9 modes).
+                    style = TextStyle(shadow = Shadow(Color.Black, Offset(0f, 1f), blurRadius = 6f)),
                     modifier = Modifier
                         .clickable(enabled = enabled && !isSelected, role = Role.Tab) { onSelect(mode) }
                         .padding(horizontal = 8.dp, vertical = 8.dp),
