@@ -164,6 +164,9 @@ class CameraSession(
     private var zoomJob: Job? = null
     private val uiVisibility = UiVisibility()
     private val discardingPreview = DiscardingSurfaceProvider()
+
+    /** What the bound Preview currently draws into (CameraX keeps its getter internal). */
+    private var routedProvider: Preview.SurfaceProvider? = null
     private val uiVisible: Boolean get() = uiVisibility.anyVisible
     private var selectedBackCameraId: String? = null
     private var targetRotation = Surface.ROTATION_0
@@ -219,7 +222,7 @@ class CameraSession(
         meteringFactory: MeteringPointFactory,
     ) {
         target = PreviewTarget(surfaceProvider, displayRotation, portrait, meteringFactory)
-        preview?.surfaceProvider = surfaceProvider
+        routePreview()
         requestBind()
     }
 
@@ -227,7 +230,7 @@ class CameraSession(
     fun detachPreview(surfaceProvider: Preview.SurfaceProvider) {
         if (target?.surfaceProvider !== surfaceProvider) return
         target = null
-        preview?.surfaceProvider = discardingPreview.takeIf { _state.value.recording != null }
+        routePreview()
     }
 
     fun onUiVisible(visible: Boolean) {
@@ -249,8 +252,12 @@ class CameraSession(
      */
     private fun routePreview() {
         val preview = preview ?: return
-        val provider = if (uiVisible) target?.surfaceProvider else discardingPreview.takeIf { _state.value.recording != null }
-        if (preview.surfaceProvider !== provider) preview.surfaceProvider = provider
+        val provider = (if (uiVisible) target?.surfaceProvider else null)
+            ?: discardingPreview.takeIf { _state.value.recording != null }
+        if (routedProvider !== provider) {
+            routedProvider = provider
+            preview.surfaceProvider = provider
+        }
     }
 
     /** Switches to a separately exposed back camera (ultra-wide, telephoto); null returns to the default one. */
@@ -633,7 +640,10 @@ class CameraSession(
         for ((index, attempt) in attempts.withIndex()) {
             val kinds = attempt.kinds
             val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect)).build()
-                .also { it.surfaceProvider = target.surfaceProvider }
+                .also {
+                    it.surfaceProvider = target.surfaceProvider
+                    routedProvider = target.surfaceProvider
+                }
             val imageCapture = if (UseCaseKind.IMAGE in kinds) {
                 ImageCapture.Builder()
                     // Minimal shutter lag keeps a live photo's still close to its stamped moment in the clip;
@@ -730,7 +740,10 @@ class CameraSession(
             fallBackOrFail(null)
             return
         }
-        val preview = Preview.Builder().build().also { it.surfaceProvider = target.surfaceProvider }
+        val preview = Preview.Builder().build().also {
+            it.surfaceProvider = target.surfaceProvider
+            routedProvider = target.surfaceProvider
+        }
         val videoCapture = VideoCapture.withOutput(
             Recorder.Builder().setQualitySelector(QualitySelector.from(quality)).build(),
         )
