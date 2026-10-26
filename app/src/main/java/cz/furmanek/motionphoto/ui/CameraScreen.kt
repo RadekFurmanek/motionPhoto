@@ -1,6 +1,7 @@
 package cz.furmanek.motionphoto.ui
 
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.net.Uri
@@ -8,12 +9,10 @@ import android.view.OrientationEventListener
 import android.view.Surface
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -31,7 +31,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cameraswitch
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.SnackbarHost
@@ -45,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,36 +57,61 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cz.furmanek.motionphoto.R
-import cz.furmanek.motionphoto.camera.PhotoCapture
 import cz.furmanek.motionphoto.camera.SessionEvent
 import cz.furmanek.motionphoto.camera.SessionStatus
+import cz.furmanek.motionphoto.camera.zoomPresets
+import cz.furmanek.motionphoto.media.MediaKind
+import cz.furmanek.motionphoto.settings.CaptureMode
+import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
+import cz.furmanek.motionphoto.settings.effectiveLivePhoto
+import cz.furmanek.motionphoto.ui.components.ExposureSlider
+import cz.furmanek.motionphoto.ui.components.GridOverlay
+import cz.furmanek.motionphoto.ui.components.LastCaptureThumbnail
+import cz.furmanek.motionphoto.ui.components.LensChips
+import cz.furmanek.motionphoto.ui.components.ModeBar
+import cz.furmanek.motionphoto.ui.components.QuickSettingsBar
+import cz.furmanek.motionphoto.ui.components.RecordingIndicator
+import cz.furmanek.motionphoto.ui.components.ShutterButton
+import cz.furmanek.motionphoto.ui.components.ZoomChips
+import cz.furmanek.motionphoto.ui.components.outputAspect
+import kotlin.math.abs
 import kotlinx.coroutines.delay
 
 private const val FOCUS_INDICATOR_VISIBLE_MS = 1_200L
+private const val EXPOSURE_SLIDER_VISIBLE_MS = 3_000L
+private val MODES = listOf(CaptureMode.VIDEO, CaptureMode.PHOTO)
+private val MODE_SWIPE_THRESHOLD = 48.dp
 
 @Composable
 fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
     val state by viewModel.sessionState.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val resources = LocalResources.current
     val displayRotation = LocalView.current.display?.rotation ?: Surface.ROTATION_0
     val isPortrait = LocalConfiguration.current.orientation != Configuration.ORIENTATION_LANDSCAPE
     val snackbarHostState = remember { SnackbarHostState() }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
 
-    // FIT_CENTER shows the full 4:3 frame that ends up in the photo and the video.
-    val previewView = remember {
-        PreviewView(context).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
-    }
+    val capabilities = state.capabilities
+    val recording = state.recording
+    val locked = state.busy || recording != null
+    val ready = state.status == SessionStatus.READY
+    val isVideo = settings.mode == CaptureMode.VIDEO
+
+    // FIT_CENTER shows exactly the frame that is saved.
+    val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FIT_CENTER } }
 
     DisposableEffect(viewModel, displayRotation, isPortrait) {
         val surfaceProvider = previewView.surfaceProvider
@@ -95,19 +122,23 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
         viewModel.onUiVisible(true)
         onStopOrDispose { viewModel.onUiVisible(false) }
     }
-
     DeviceRotationEffect(onRotationChanged = viewModel::setTargetRotation)
 
     LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
             when (event) {
                 is SessionEvent.Saved -> {
+                    val message = when (event.media.kind) {
+                        MediaKind.MOTION_PHOTO -> R.string.saved
+                        MediaKind.PHOTO -> R.string.saved_photo
+                        MediaKind.VIDEO -> R.string.saved_video
+                    }
                     val result = snackbarHostState.showSnackbar(
-                        message = resources.getString(R.string.saved),
+                        message = resources.getString(message),
                         actionLabel = resources.getString(R.string.view),
                         withDismissAction = true,
                     )
-                    if (result == SnackbarResult.ActionPerformed) context.openImage(event.uri)
+                    if (result == SnackbarResult.ActionPerformed) context.openMedia(event.media.uri)
                 }
                 is SessionEvent.RecordingInterrupted ->
                     snackbarHostState.showSnackbar(resources.getString(R.string.recording_interrupted))
@@ -123,6 +154,14 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
         delay(FOCUS_INDICATOR_VISIBLE_MS)
         focusPoint = null
     }
+    var exposureInteraction by remember { mutableIntStateOf(0) }
+    var exposureVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(exposureInteraction) {
+        delay(EXPOSURE_SLIDER_VISIBLE_MS)
+        exposureVisible = false
+    }
+    val exposureRange = capabilities?.exposureRange
+    val canAdjustExposure = exposureRange != null && exposureRange.first < exposureRange.last
 
     Box(
         modifier = Modifier
@@ -140,6 +179,8 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                     detectTapGestures { offset ->
                         focusPoint = offset
                         focusTapCount++
+                        exposureVisible = true
+                        exposureInteraction++
                         viewModel.focusAt(offset.x, offset.y)
                     }
                 }
@@ -149,108 +190,177 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                     }
                 },
         ) {
+            if (settings.grid) GridOverlay(outputAspect(isVideo, settings.aspect), Modifier.fillMaxSize())
             focusPoint?.let { FocusIndicator(position = it, key = focusTapCount) }
         }
 
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .windowInsetsPadding(WindowInsets.safeDrawing),
-        )
+        state.countdown?.let {
+            Text(
+                text = it.toString(),
+                color = Color.White,
+                fontSize = 96.sp,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
 
         Column(
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(bottom = 32.dp),
+                .align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.safeDrawing),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            state.errorMessage?.let {
-                Text(text = it, color = Color.White, modifier = Modifier.padding(bottom = 16.dp))
-            }
-            if (state.status == SessionStatus.READY) {
-                Text(
-                    text = stringResource(R.string.zoom_ratio, state.zoomRatio),
-                    color = Color.White,
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.4f))
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                )
-            }
-            Spacer(Modifier.size(24.dp))
-            val canSwitch = state.capabilities?.let { it.hasFrontCamera && it.hasBackCamera } == true && !state.busy
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Spacer(Modifier.size(56.dp))
-                ShutterButton(
-                    enabled = state.status == SessionStatus.READY && !state.busy,
-                    isCapturing = state.busy,
-                    onClick = viewModel::capture,
-                )
-                IconButton(
-                    onClick = viewModel::switchCamera,
-                    enabled = canSwitch,
-                    modifier = Modifier
-                        .size(56.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.4f)),
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Cameraswitch,
-                        contentDescription = stringResource(R.string.switch_camera),
-                        tint = if (canSwitch) Color.White else Color.Gray,
+            QuickSettingsBar(
+                settings = settings,
+                capabilities = capabilities,
+                locked = locked,
+                onUpdate = viewModel::updateSettings,
+                onOpenSettings = { showSettings = true },
+            )
+            recording?.let { RecordingIndicator(it.durationNanos, it.paused, Modifier.padding(top = 8.dp)) }
+            SnackbarHost(snackbarHostState)
+        }
+
+        BottomControls(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(bottom = 16.dp),
+            viewModel = viewModel,
+            exposureSlider = {
+                if (exposureVisible && canAdjustExposure && exposureRange != null) {
+                    ExposureSlider(
+                        index = state.exposureIndex,
+                        range = exposureRange,
+                        onChange = viewModel::setExposureIndex,
+                        onInteraction = { exposureInteraction++ },
                     )
                 }
-            }
+            },
+        )
+
+        if (!ready && state.errorMessage != null) {
+            Text(
+                text = state.errorMessage.orEmpty(),
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(32.dp),
+            )
+        }
+
+        if (showSettings) {
+            SettingsScreen(
+                settings = settings,
+                capabilities = capabilities,
+                shutterSoundMandatory = viewModel.shutterSoundMandatory,
+                onUpdate = viewModel::updateSettings,
+                onBack = { showSettings = false },
+            )
         }
     }
 }
 
 @Composable
-private fun ShutterButton(enabled: Boolean, isCapturing: Boolean, onClick: () -> Unit) {
-    val progress = remember { Animatable(0f) }
-    LaunchedEffect(isCapturing) {
-        progress.snapTo(0f)
-        if (isCapturing) {
-            progress.animateTo(1f, tween(PhotoCapture.CLIP_DURATION_MS.toInt(), easing = LinearEasing))
-        }
-    }
+private fun BottomControls(
+    viewModel: CameraViewModel,
+    exposureSlider: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val state by viewModel.sessionState.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val capabilities = state.capabilities
+    val recording = state.recording
+    val locked = state.busy || recording != null
+    val ready = state.status == SessionStatus.READY
+    val isVideo = settings.mode == CaptureMode.VIDEO
+    val swipeThresholdPx = with(LocalDensity.current) { MODE_SWIPE_THRESHOLD.toPx() }
 
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-            .size(80.dp)
-            .clip(CircleShape)
-            .border(4.dp, Color.White, CircleShape)
-            .clickable(
-                enabled = enabled,
-                role = Role.Button,
-                onClickLabel = stringResource(R.string.shutter),
-                onClick = onClick,
-            ),
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .pointerInput(locked) {
+                if (locked) return@pointerInput
+                var dragged = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { dragged = 0f },
+                    onDragEnd = {
+                        if (abs(dragged) >= swipeThresholdPx) {
+                            val index = MODES.indexOf(viewModel.settings.value.mode)
+                            // Swiping left moves to the mode on the right, as in other camera apps.
+                            val next = (index + if (dragged < 0) 1 else -1).coerceIn(MODES.indices)
+                            viewModel.setMode(MODES[next])
+                        }
+                    },
+                ) { _, dragAmount -> dragged += dragAmount }
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .size(64.dp)
-                .clip(CircleShape)
-                .background(if (enabled) Color.White else Color.White.copy(alpha = 0.5f)),
-        )
-        if (isCapturing) {
-            CircularProgressIndicator(
-                progress = { progress.value },
-                modifier = Modifier.size(80.dp),
-                color = Color.Red,
-                strokeWidth = 4.dp,
-                trackColor = Color.Transparent,
-            )
+        exposureSlider()
+
+        if (ready && capabilities != null) {
+            val lenses = capabilities.backLenses
+            if (lenses.isNotEmpty() && state.lensFacing == LENS_FACING_BACK) {
+                LensChips(lenses, state.activeCameraId, onSelect = { if (!locked) viewModel.selectBackCamera(it) })
+            } else {
+                ZoomChips(zoomPresets(capabilities.minZoom, capabilities.maxZoom), state.zoomRatio, onSelect = viewModel::setZoom)
+            }
         }
+
+        ModeBar(MODES, settings.mode, enabled = !locked, onSelect = viewModel::setMode)
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (recording != null) {
+                RoundButton(
+                    onClick = if (recording.paused) viewModel::resumeRecording else viewModel::pauseRecording,
+                ) {
+                    Icon(
+                        if (recording.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                        contentDescription = stringResource(if (recording.paused) R.string.resume else R.string.pause),
+                        tint = Color.White,
+                    )
+                }
+            } else {
+                LastCaptureThumbnail(state.lastCapture, onClick = { context.openMedia(it) })
+            }
+
+            ShutterButton(
+                isVideo = isVideo,
+                isRecording = recording != null,
+                showClipProgress = state.busy && state.countdown == null && !isVideo && settings.effectiveLivePhoto(),
+                // During the self-timer the shutter cancels the countdown.
+                enabled = ready && (!state.busy || state.countdown != null),
+                onClick = viewModel::onShutter,
+            )
+
+            val canSwitch = capabilities?.let { it.hasFrontCamera && it.hasBackCamera } == true && !locked
+            RoundButton(onClick = viewModel::switchCamera, enabled = canSwitch) {
+                Icon(
+                    imageVector = Icons.Filled.Cameraswitch,
+                    contentDescription = stringResource(R.string.switch_camera),
+                    tint = if (canSwitch) Color.White else Color.Gray,
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
     }
+}
+
+@Composable
+private fun RoundButton(onClick: () -> Unit, enabled: Boolean = true, content: @Composable () -> Unit) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .size(56.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.4f)),
+    ) { content() }
 }
 
 @Composable
@@ -293,13 +403,13 @@ private fun DeviceRotationEffect(onRotationChanged: (Int) -> Unit) {
     }
 }
 
-private fun android.content.Context.openImage(uri: Uri) {
-    val intent = Intent(Intent.ACTION_VIEW, uri)
-        .setDataAndType(uri, "image/jpeg")
+private fun Context.openMedia(uri: Uri) {
+    val intent = Intent(Intent.ACTION_VIEW)
+        .setDataAndType(uri, contentResolver.getType(uri))
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     try {
         startActivity(intent)
     } catch (_: ActivityNotFoundException) {
-        // No gallery app installed; the photo is still saved in DCIM/Camera.
+        // No gallery app installed; the capture is still saved in DCIM/Camera.
     }
 }

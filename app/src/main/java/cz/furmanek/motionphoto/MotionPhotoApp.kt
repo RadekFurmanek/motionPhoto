@@ -10,6 +10,6 @@ private val Application.settingsDataStore by preferencesDataStore(name = "camera
 
 class MotionPhotoApp : Application() {
     val settingsRepository by lazy { SettingsRepository(settingsDataStore) }
-    val mediaStoreWriter by lazy { MediaStoreWriter(contentResolver) }
+    val mediaStoreWriter by lazy { MediaStoreWriter(contentResolver, packageName) }
     val cameraSession by lazy { CameraSession(this, settingsRepository, mediaStoreWriter) }
 }

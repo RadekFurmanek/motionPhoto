@@ -5,7 +5,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Location
-import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import androidx.camera.core.ImageCapture
@@ -16,7 +15,9 @@ import androidx.camera.video.Recorder
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.core.content.ContextCompat
+import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.media.MediaStoreWriter
+import cz.furmanek.motionphoto.media.SavedMedia
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -57,7 +58,7 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
         capturedAtMillis: Long,
         mirrored: Boolean,
         location: Deferred<Location?>,
-    ): Uri {
+    ): SavedMedia {
         val (videoFile, stillFile) = withContext(Dispatchers.IO) {
             File.createTempFile(TEMP_VIDEO_PREFIX, ".mp4", context.cacheDir) to
                 File.createTempFile(TEMP_STILL_PREFIX, ".jpg", context.cacheDir)
@@ -67,10 +68,11 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
             val location = location.await()
             return withContext(Dispatchers.IO) {
                 if (presentationTimestampUs != null) {
-                    writer.saveMotionPhoto(stillFile, videoFile, presentationTimestampUs, capturedAtMillis, location)
+                    val uri = writer.saveMotionPhoto(stillFile, videoFile, presentationTimestampUs, capturedAtMillis, location)
+                    SavedMedia(uri, MediaKind.MOTION_PHOTO)
                 } else {
                     // The clip failed but the still is fine: keep the shot as an ordinary photo.
-                    writer.savePhoto(stillFile, capturedAtMillis, location)
+                    SavedMedia(writer.savePhoto(stillFile, capturedAtMillis, location), MediaKind.PHOTO)
                 }
             }
         } finally {
@@ -86,12 +88,14 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
         capturedAtMillis: Long,
         mirrored: Boolean,
         location: Deferred<Location?>,
-    ): Uri {
+    ): SavedMedia {
         val stillFile = withContext(Dispatchers.IO) { File.createTempFile(TEMP_STILL_PREFIX, ".jpg", context.cacheDir) }
         try {
             imageCapture.takePictureTo(stillFile, mirrored)
             val location = location.await()
-            return withContext(Dispatchers.IO) { writer.savePhoto(stillFile, capturedAtMillis, location) }
+            return withContext(Dispatchers.IO) {
+                SavedMedia(writer.savePhoto(stillFile, capturedAtMillis, location), MediaKind.PHOTO)
+            }
         } finally {
             withContext(NonCancellable + Dispatchers.IO) { stillFile.delete() }
         }

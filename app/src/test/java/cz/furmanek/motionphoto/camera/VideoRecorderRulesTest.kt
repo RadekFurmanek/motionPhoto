@@ -31,10 +31,15 @@ class VideoRecorderRulesTest {
 
     @Test
     fun `microphone service type only with audio`() {
-        assertEquals(ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA, foregroundServiceTypes(withAudio = false))
+        assertEquals(ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA, foregroundServiceTypes(withAudio = false, sdkInt = 34))
         assertEquals(
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-            foregroundServiceTypes(withAudio = true),
+            foregroundServiceTypes(withAudio = true, sdkInt = 34),
         )
+    }
+
+    @Test
+    fun `no service types on Android 10 which does not know camera and microphone types`() {
+        assertEquals(0, foregroundServiceTypes(withAudio = true, sdkInt = 29))
     }
 }

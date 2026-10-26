@@ -9,6 +9,7 @@ import cz.furmanek.motionphoto.MotionPhotoApp
 import cz.furmanek.motionphoto.camera.SessionEvent
 import cz.furmanek.motionphoto.camera.SessionState
 import cz.furmanek.motionphoto.settings.CameraSettings
+import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
 import cz.furmanek.motionphoto.settings.LENS_FACING_FRONT
 import kotlinx.coroutines.flow.Flow
@@ -40,7 +41,18 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun onUiVisible(visible: Boolean) = session.onUiVisible(visible)
 
-    fun capture() = session.takePhoto()
+    val shutterSoundMandatory: Boolean = session.shutterSoundMandatory
+
+    fun onShutter() = session.onShutter()
+
+    fun pauseRecording() = session.pauseRecording()
+
+    fun resumeRecording() = session.resumeRecording()
+
+    fun setMode(mode: CaptureMode) {
+        if (isLocked()) return
+        updateSettings { it.copy(mode = mode) }
+    }
 
     fun switchCamera() {
         if (isLocked()) return

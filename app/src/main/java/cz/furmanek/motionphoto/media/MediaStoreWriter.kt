@@ -1,6 +1,7 @@
 package cz.furmanek.motionphoto.media
 
 import android.content.ContentResolver
+import android.content.ContentUris
 import android.content.ContentValues
 import android.location.Location
 import android.net.Uri
@@ -14,7 +15,7 @@ import java.io.IOException
 import java.io.OutputStream
 
 /** Saves captures to the shared DCIM/Camera folder, where Google Photos picks them up. */
-class MediaStoreWriter(private val resolver: ContentResolver) {
+class MediaStoreWriter(private val resolver: ContentResolver, private val packageName: String) {
 
     /** Muxes [jpeg] and [video] into one Motion Photo. [location] goes into the still's EXIF. */
     fun saveMotionPhoto(
@@ -49,6 +50,26 @@ class MediaStoreWriter(private val resolver: ContentResolver) {
             .setContentValues(values)
             .setLocation(location)
             .build()
+    }
+
+    /** The newest photo or video this app saved, for the last-capture thumbnail after a restart. */
+    fun latestOwnCapture(): Uri? {
+        val collections = listOf(
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+        )
+        return collections.mapNotNull { collection ->
+            resolver.query(
+                collection,
+                arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATE_ADDED),
+                "${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ?",
+                arrayOf(packageName),
+                "${MediaStore.MediaColumns.DATE_ADDED} DESC",
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                ContentUris.withAppendedId(collection, cursor.getLong(0)) to cursor.getLong(1)
+            }
+        }.maxByOrNull { it.second }?.first
     }
 
     /**

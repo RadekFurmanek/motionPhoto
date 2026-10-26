@@ -36,7 +36,9 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.asFlow
 import cz.furmanek.motionphoto.R
+import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.media.MediaStoreWriter
+import cz.furmanek.motionphoto.media.SavedMedia
 import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.FlashSetting
@@ -64,6 +66,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class SessionStatus { CLOSED, OPENING, READY, ERROR }
 
@@ -84,7 +87,7 @@ data class SessionState(
 )
 
 sealed interface SessionEvent {
-    data class Saved(val uri: Uri) : SessionEvent
+    data class Saved(val media: SavedMedia) : SessionEvent
     data class CaptureFailed(val message: String) : SessionEvent
     /** The recording stopped early (storage full, camera taken away); what was recorded is saved at [uri]. */
     data class RecordingInterrupted(val uri: Uri?) : SessionEvent
@@ -97,7 +100,7 @@ sealed interface SessionEvent {
 class CameraSession(
     private val app: Application,
     private val settingsRepository: SettingsRepository,
-    writer: MediaStoreWriter,
+    private val writer: MediaStoreWriter,
 ) : LifecycleOwner {
 
     private val registry = LifecycleRegistry(this).apply { currentState = Lifecycle.State.CREATED }
@@ -164,6 +167,10 @@ class CameraSession(
 
     init {
         scope.launch(Dispatchers.IO) { PhotoCapture.deleteTempFiles(app.cacheDir) }
+        scope.launch {
+            val latest = withContext(Dispatchers.IO) { runCatching { writer.latestOwnCapture() }.getOrNull() }
+            if (latest != null) _state.update { it.copy(lastCapture = it.lastCapture ?: latest) }
+        }
         scope.launch {
             settingsRepository.settings.collect { new ->
                 settings = new
@@ -261,9 +268,9 @@ class CameraSession(
                     delay(COUNTDOWN_STEP_MS)
                 }
                 _state.update { it.copy(countdown = null) }
-                val uri = shoot(imageCapture)
-                _state.update { it.copy(lastCapture = uri) }
-                _events.emit(SessionEvent.Saved(uri))
+                val saved = shoot(imageCapture)
+                _state.update { it.copy(lastCapture = saved.uri) }
+                _events.emit(SessionEvent.Saved(saved))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -277,7 +284,7 @@ class CameraSession(
         }
     }
 
-    private suspend fun shoot(imageCapture: ImageCapture): Uri = coroutineScope {
+    private suspend fun shoot(imageCapture: ImageCapture): SavedMedia = coroutineScope {
         val capturedAt = System.currentTimeMillis()
         val location = async {
             if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
@@ -291,6 +298,18 @@ class CameraSession(
             photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location)
         }
     }
+
+    /** The shutter of the current mode: photo (or self-timer), or start/stop a video. */
+    fun onShutter() {
+        when {
+            settings.mode == CaptureMode.PHOTO -> takePhoto()
+            _state.value.recording != null -> stopRecording()
+            else -> startRecording()
+        }
+    }
+
+    /** Whether the volume keys act as the shutter (a setting). */
+    val volumeKeyShutter: Boolean get() = settings.volumeKeyShutter
 
     fun startRecording() {
         val current = _state.value
@@ -346,7 +365,7 @@ class CameraSession(
         RecordingService.stop(app)
         playSound(MediaActionSound.STOP_VIDEO_RECORDING)
         when (outcome) {
-            FinalizeOutcome.SAVED -> uri?.let { _events.tryEmit(SessionEvent.Saved(it)) }
+            FinalizeOutcome.SAVED -> uri?.let { _events.tryEmit(SessionEvent.Saved(SavedMedia(it, MediaKind.VIDEO))) }
             FinalizeOutcome.SAVED_INTERRUPTED -> {
                 _events.tryEmit(SessionEvent.RecordingInterrupted(uri))
                 if (!uiVisible) RecordingService.notifyResult(app, app.getString(R.string.recording_interrupted))

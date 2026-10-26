@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.location.Location
+import android.os.Build
 import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
@@ -29,13 +30,16 @@ fun classifyFinalize(error: Int): FinalizeOutcome = when (error) {
     else -> FinalizeOutcome.FAILED
 }
 
-/** Android 14+ refuses a microphone-typed foreground service without RECORD_AUDIO, so the type follows the audio. */
-fun foregroundServiceTypes(withAudio: Boolean): Int =
-    if (withAudio) {
-        ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-    } else {
-        ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-    }
+/**
+ * Android 14+ refuses a microphone-typed foreground service without RECORD_AUDIO, so the type follows the audio.
+ * Android 10 has no camera or microphone types and rejects types missing from its manifest view, so it gets none.
+ */
+@SuppressLint("InlinedApi")
+fun foregroundServiceTypes(withAudio: Boolean, sdkInt: Int = Build.VERSION.SDK_INT): Int = when {
+    sdkInt < Build.VERSION_CODES.R -> 0
+    withAudio -> ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+    else -> ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+}
 
 /** One video recording at a time, written straight into MediaStore. */
 class VideoRecorder(private val context: Context, private val writer: MediaStoreWriter) {
