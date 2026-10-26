@@ -64,4 +64,9 @@
     <string name="aspect_4_3">4:3</string>
     <string name="aspect_16_9">16:9</string>
     <string name="aspect_1_1">1:1</string>
+    <string name="intent_use">Použít</string>
+    <string name="intent_retake">Znovu</string>
+    <string name="intent_busy">Fotoaparát právě natáčí video</string>
+    <string name="intent_video_recorded">Video natočeno (%1$s)</string>
+    <string name="intent_failed">Výsledek se nepodařilo předat: %1$s</string>
 </resources>

@@ -38,6 +38,21 @@ class MediaStoreWriter(private val resolver: ContentResolver, private val packag
         }
     }
 
+    /** Copies a finished video file into DCIM/Camera (used when another app asked for a video without a target). */
+    fun saveVideoFile(video: File, capturedAtMillis: Long): Uri {
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, MediaNaming.fileName(MediaKind.VIDEO, capturedAtMillis))
+            put(MediaStore.Video.Media.MIME_TYPE, MediaKind.VIDEO.mimeType)
+            put(MediaStore.Video.Media.RELATIVE_PATH, RELATIVE_PATH)
+            put(MediaStore.Video.Media.DATE_TAKEN, capturedAtMillis)
+            put(MediaStore.Video.Media.IS_PENDING, 1)
+        }
+        val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        return insertPending(collection, values, MediaStore.Video.Media.IS_PENDING) { output ->
+            video.inputStream().use { it.copyTo(output) }
+        }
+    }
+
     /** The Recorder writes the video into MediaStore itself and handles the pending state. */
     fun videoOutputOptions(capturedAtMillis: Long, location: Location?): MediaStoreOutputOptions {
         val values = ContentValues().apply {
@@ -85,12 +100,21 @@ class MediaStoreWriter(private val resolver: ContentResolver, private val packag
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
         val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        return insertPending(collection, values, MediaStore.Images.Media.IS_PENDING, write)
+    }
+
+    private fun insertPending(
+        collection: Uri,
+        values: ContentValues,
+        pendingColumn: String,
+        write: (OutputStream) -> Unit,
+    ): Uri {
         val uri = resolver.insert(collection, values)
             ?: throw IOException("MediaStore refused to create an entry in $RELATIVE_PATH")
         try {
             val output = resolver.openOutputStream(uri, "w") ?: throw IOException("Cannot open $uri for writing")
             output.buffered().use(write)
-            resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
+            resolver.update(uri, ContentValues().apply { put(pendingColumn, 0) }, null, null)
             return uri
         } catch (e: Throwable) {
             try {

@@ -201,7 +201,14 @@ class CameraSession(
 
     fun onUiVisible(visible: Boolean) {
         uiVisible = visible
+        // Another screen (capture for another app) may have bound the camera meanwhile, which unbinds ours.
+        val preview = preview
+        if (visible && preview != null && provider?.isBound(preview) == false) {
+            camera = null
+            boundKey = null
+        }
         updateLifecycle()
+        if (visible) requestBind()
     }
 
     /** Switches to a separately exposed back camera (ultra-wide, telephoto); null returns to the default one. */
