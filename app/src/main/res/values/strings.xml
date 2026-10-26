@@ -19,4 +19,10 @@
     <string name="camera_error_disabled">Fotoaparát je zakázaný zásadami zařízení</string>
     <string name="camera_error_dnd">Fotoaparát nejde spustit v režimu Nerušit</string>
     <string name="camera_error_generic">Chyba fotoaparátu</string>
+    <string name="recording_notification_title">Nahrává se video</string>
+    <string name="recording_stop">Zastavit</string>
+    <string name="recording_channel">Nahrávání videa</string>
+    <string name="recording_results_channel">Výsledky nahrávání</string>
+    <string name="recording_interrupted">Nahrávání bylo přerušeno, natočené video je uložené</string>
+    <string name="recording_failed">Video se nepodařilo uložit</string>
 </resources>

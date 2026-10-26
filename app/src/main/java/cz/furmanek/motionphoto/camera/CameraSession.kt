@@ -30,6 +30,7 @@ import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
 import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -85,6 +86,8 @@ data class SessionState(
 sealed interface SessionEvent {
     data class Saved(val uri: Uri) : SessionEvent
     data class CaptureFailed(val message: String) : SessionEvent
+    /** The recording stopped early (storage full, camera taken away); what was recorded is saved at [uri]. */
+    data class RecordingInterrupted(val uri: Uri?) : SessionEvent
 }
 
 /**
@@ -103,7 +106,12 @@ class CameraSession(
     private val scope = MainScope()
     private val photoCapture = PhotoCapture(app, writer)
     private val locationProvider = LocationProvider(app)
-    private val shutterSound = MediaActionSound().apply { load(MediaActionSound.SHUTTER_CLICK) }
+    private val videoRecorder = VideoRecorder(app, writer)
+    private val shutterSound = MediaActionSound().apply {
+        load(MediaActionSound.SHUTTER_CLICK)
+        load(MediaActionSound.START_VIDEO_RECORDING)
+        load(MediaActionSound.STOP_VIDEO_RECORDING)
+    }
 
     /** True where the law requires the shutter sound (e.g. Japan); the setting cannot turn it off there. */
     val shutterSoundMandatory: Boolean =
@@ -274,7 +282,7 @@ class CameraSession(
         val location = async {
             if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
         }
-        if (settings.shutterSoundRequired(shutterSoundMandatory)) shutterSound.play(MediaActionSound.SHUTTER_CLICK)
+        playSound(MediaActionSound.SHUTTER_CLICK)
         val mirrored = settings.mirrorFrontCamera && _state.value.lensFacing == LENS_FACING_FRONT
         val videoCapture = videoCapture
         if (settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && videoCapture != null) {
@@ -282,6 +290,81 @@ class CameraSession(
         } else {
             photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location)
         }
+    }
+
+    fun startRecording() {
+        val current = _state.value
+        val videoCapture = videoCapture
+        if (settings.mode != CaptureMode.VIDEO || current.status != SessionStatus.READY || current.busy ||
+            current.recording != null || videoCapture == null
+        ) {
+            return
+        }
+        val withAudio = videoRecorder.hasAudioPermission()
+        val location = if (settings.saveLocation) locationProvider.lastKnownOrNull() else null
+        // The service goes first: it must hold the process before the Activity can go away.
+        RecordingService.start(app, withAudio)
+        try {
+            playSound(MediaActionSound.START_VIDEO_RECORDING)
+            videoRecorder.start(videoCapture, withAudio, location, ::onRecordEvent)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "Starting the recording failed", e)
+            RecordingService.stop(app)
+            _events.tryEmit(SessionEvent.CaptureFailed(e.message ?: e.javaClass.simpleName))
+            return
+        }
+        _state.update { it.copy(recording = RecordingState(durationNanos = 0, paused = false, withAudio = withAudio)) }
+        updateLifecycle()
+    }
+
+    fun pauseRecording() = videoRecorder.pause()
+
+    fun resumeRecording() = videoRecorder.resume()
+
+    fun stopRecording() = videoRecorder.stop()
+
+    private fun onRecordEvent(event: VideoRecordEvent) {
+        when (event) {
+            is VideoRecordEvent.Pause -> updateRecording { it.copy(paused = true) }
+            is VideoRecordEvent.Resume -> updateRecording { it.copy(paused = false) }
+            is VideoRecordEvent.Finalize -> onRecordingFinalized(event)
+            else -> updateRecording { it.copy(durationNanos = event.recordingStats.recordedDurationNanos) }
+        }
+    }
+
+    private fun updateRecording(transform: (RecordingState) -> RecordingState) {
+        _state.update { state -> state.recording?.let { state.copy(recording = transform(it)) } ?: state }
+    }
+
+    private fun onRecordingFinalized(event: VideoRecordEvent.Finalize) {
+        val outcome = classifyFinalize(event.error)
+        val uri = event.outputResults.outputUri.takeIf { it != Uri.EMPTY }
+        if (outcome != FinalizeOutcome.SAVED) Log.w(TAG, "Recording finalized with error ${event.error}", event.cause)
+        _state.update {
+            it.copy(recording = null, lastCapture = if (outcome != FinalizeOutcome.FAILED && uri != null) uri else it.lastCapture)
+        }
+        RecordingService.stop(app)
+        playSound(MediaActionSound.STOP_VIDEO_RECORDING)
+        when (outcome) {
+            FinalizeOutcome.SAVED -> uri?.let { _events.tryEmit(SessionEvent.Saved(it)) }
+            FinalizeOutcome.SAVED_INTERRUPTED -> {
+                _events.tryEmit(SessionEvent.RecordingInterrupted(uri))
+                if (!uiVisible) RecordingService.notifyResult(app, app.getString(R.string.recording_interrupted))
+            }
+            FinalizeOutcome.FAILED -> {
+                val message = app.getString(R.string.recording_failed)
+                _events.tryEmit(SessionEvent.CaptureFailed(message))
+                if (!uiVisible) RecordingService.notifyResult(app, message)
+            }
+        }
+        updateLifecycle()
+        applyTargetRotation()
+        applyCameraControls()
+        requestBind()
+    }
+
+    private fun playSound(sound: Int) {
+        if (settings.shutterSoundRequired(shutterSoundMandatory)) shutterSound.play(sound)
     }
 
     private fun isLocked(): Boolean = _state.value.busy || _state.value.recording != null

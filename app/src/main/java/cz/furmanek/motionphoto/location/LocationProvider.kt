@@ -21,6 +21,14 @@ class LocationProvider(private val context: Context) {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         }
 
+    /** The newest last-known fix, without waiting; for video, whose location is fixed when recording starts. */
+    @SuppressLint("MissingPermission")
+    fun lastKnownOrNull(): Location? {
+        if (!hasPermission()) return null
+        val manager = context.getSystemService(LocationManager::class.java) ?: return null
+        return PROVIDERS.mapNotNull { runCatching { manager.getLastKnownLocation(it) }.getOrNull() }.maxByOrNull { it.time }
+    }
+
     /** A fresh fix if one arrives within [CURRENT_FIX_TIMEOUT_MS], else the newest last-known one; null without permission. */
     @SuppressLint("MissingPermission")
     suspend fun currentOrNull(): Location? {

@@ -109,6 +109,8 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                     )
                     if (result == SnackbarResult.ActionPerformed) context.openImage(event.uri)
                 }
+                is SessionEvent.RecordingInterrupted ->
+                    snackbarHostState.showSnackbar(resources.getString(R.string.recording_interrupted))
                 is SessionEvent.CaptureFailed ->
                     snackbarHostState.showSnackbar(resources.getString(R.string.error_capture, event.message))
             }
