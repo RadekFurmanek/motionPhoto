@@ -1,6 +1,7 @@
 package cz.furmanek.motionphoto.camera
 
 import android.app.Application
+import android.graphics.SurfaceTexture
 import android.media.MediaActionSound
 import android.net.Uri
 import android.os.Build
@@ -17,9 +18,9 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState
-import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ExperimentalZeroShutterLag
 import androidx.camera.core.ExtendableBuilder
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.MeteringPointFactory
@@ -30,23 +31,25 @@ import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.HighSpeedVideoSessionConfig
 import androidx.camera.lifecycle.awaitInstance
-import androidx.core.content.ContextCompat
 import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.HighSpeedVideoSessionConfig
 import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.asFlow
-import androidx.compose.ui.graphics.ImageBitmap
 import cz.furmanek.motionphoto.R
+import cz.furmanek.motionphoto.livephoto.PreRollRecorder
+import cz.furmanek.motionphoto.location.LocationProvider
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.media.MediaStoreWriter
 import cz.furmanek.motionphoto.media.SavedMedia
@@ -60,7 +63,6 @@ import cz.furmanek.motionphoto.panorama.stitchPanorama
 import cz.furmanek.motionphoto.panorama.toJpeg
 import cz.furmanek.motionphoto.portrait.MlKitSubjectMasker
 import cz.furmanek.motionphoto.portrait.PortraitOutcome
-import cz.furmanek.motionphoto.livephoto.PreRollRecorder
 import cz.furmanek.motionphoto.portrait.PortraitPreview
 import cz.furmanek.motionphoto.portrait.PortraitProcessor
 import cz.furmanek.motionphoto.portrait.clampBlur
@@ -76,7 +78,7 @@ import cz.furmanek.motionphoto.settings.effectiveLivePhoto
 import cz.furmanek.motionphoto.settings.shutterSoundRequired
 import cz.furmanek.motionphoto.timelapse.TimelapseOutcome
 import cz.furmanek.motionphoto.timelapse.classifyTimelapse
-import cz.furmanek.motionphoto.location.LocationProvider
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.atan
@@ -153,6 +155,8 @@ data class SessionState(
     val panorama: PanoramaUiState? = null,
     /** Macro is on (Photo mode, back camera). */
     val macro: Boolean = false,
+    /** A hidden camera, opened through Camera2, shows instead of the CameraX preview. */
+    val direct: DirectKind? = null,
 ) {
     /** A capture, recording or panorama runs: mode, camera and capture settings must not change. */
     val controlsLocked: Boolean get() = busy || recording != null || panorama != null
@@ -287,6 +291,27 @@ class CameraSession(
 
     /** Binding the close-focusing camera failed once; Macro zooms the default camera instead. */
     private var macroLensBroken = false
+
+    /** The hidden ultra-wide lens and its chip's zoom, found with [lenses]. */
+    private var ultraWide: LensInfo? = null
+    private var ultraWideZoom: Float? = null
+    private var ultraWideOn = false
+
+    /** A hidden camera failed to open or work; until the app restarts only CameraX lenses are offered. */
+    private var hiddenBroken = false
+
+    /** The hidden camera in use, the id it was opened for and the surface it draws into. */
+    private var directCamera: DirectCamera? = null
+    private var directCameraId: String? = null
+    private var directTexture: SurfaceTexture? = null
+    private var directTextureUsed: SurfaceTexture? = null
+    private var directJob: Job? = null
+
+    /** Where the hidden camera's preview sits in the preview box, for taps: left, top, width, height. */
+    private var directBounds = floatArrayOf(0f, 0f, 0f, 0f)
+
+    /** A zoom preset picked while leaving the hidden camera, applied once CameraX is bound again. */
+    private var pendingZoom: Float? = null
     private var targetRotation = Surface.ROTATION_0
     private var requestedZoomRatio = 1f
 
@@ -327,7 +352,10 @@ class CameraSession(
             settingsRepository.settings.collect { new ->
                 if (_state.value.panorama?.capturing == true && endsPanorama(settings, new)) cancelPanorama()
                 // Macro belongs to the back camera's Photo mode and is off again on return.
-                if (new.mode != CaptureMode.PHOTO || new.lensFacing != LENS_FACING_BACK) setMacroOff()
+                if (new.mode != CaptureMode.PHOTO || new.lensFacing != LENS_FACING_BACK) {
+                    setMacroOff()
+                    ultraWideOn = false
+                }
                 settings = new
                 settingsLoaded = true
                 // While the slider's write is still landing, the older value must not pull it back.
@@ -362,6 +390,10 @@ class CameraSession(
         if (!uiVisible) {
             cancelPanorama()
             setMacroOff()
+            ultraWideOn = false
+            // requestBind below is skipped while hidden; the hidden camera must still let go.
+            closeDirect()
+            _state.update { it.copy(direct = null) }
         }
         updatePortraitPreview()
         updatePreRoll()
@@ -405,7 +437,7 @@ class CameraSession(
      * returns cannot hold the app; [onStage] reports each step on the main thread.
      */
     suspend fun probeHiddenCameras(ids: List<String>, onStage: (String, ProbeStage) -> Unit): Map<String, ProbeResult>? {
-        if (isLocked()) return null
+        if (isLocked() || directCamera != null) return null
         bindJob?.cancel()
         stopPortraitPreview()
         stopPreRoll()
@@ -448,6 +480,172 @@ class CameraSession(
 
     private val probeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** Uses the hidden ultra-wide camera (the 0.5× chip) or goes back to CameraX. */
+    fun selectUltraWide(on: Boolean) {
+        if (isLocked()) return
+        ultraWideOn = on
+        requestBind()
+    }
+
+    /** A zoom chip: the hidden ultra-wide's chip opens it; any other leaves it and zooms the bound camera. */
+    fun selectZoomPreset(ratio: Float) {
+        if (isLocked()) return
+        val wideZoom = ultraWideZoom
+        if (wideZoom != null && ratio == wideZoom && _state.value.capabilities?.ultraWideZoom == wideZoom) {
+            selectUltraWide(true)
+            return
+        }
+        if (ultraWideOn) {
+            pendingZoom = ratio
+            selectUltraWide(false)
+            return
+        }
+        animateZoomTo(ratio)
+    }
+
+    /** The UI's surface for the hidden camera's preview; null when it is gone. */
+    fun attachDirectSurface(texture: SurfaceTexture?) {
+        directTexture = texture
+        requestBind()
+    }
+
+    /** Where the hidden camera's preview sits in the preview box, so taps can be mapped onto it. */
+    fun setDirectBounds(left: Float, top: Float, width: Float, height: Float) {
+        directBounds = floatArrayOf(left, top, width, height)
+    }
+
+    /** The hidden camera wanted now, if any: only in the back camera's Photo mode, on screen. */
+    private fun wantedDirect(): Pair<DirectKind, String>? {
+        if (!uiVisible || hiddenBroken || settings.mode != CaptureMode.PHOTO || settings.lensFacing != LENS_FACING_BACK) {
+            return null
+        }
+        val setup = macroSetup
+        if (macroOn && setup is MacroSetup.Hidden) return DirectKind.MACRO to setup.cameraId
+        val wide = ultraWide
+        if (ultraWideOn && !macroOn && wide != null) return DirectKind.ULTRA_WIDE to wide.cameraId
+        return null
+    }
+
+    /**
+     * Opens or closes the hidden camera to match [wantedDirect]. True while it owns the camera, so CameraX must
+     * not bind; it opens once the UI has handed over its surface.
+     */
+    private fun updateDirect(): Boolean {
+        val wanted = wantedDirect()
+        val kind = wanted?.first
+        if (_state.value.direct != kind) _state.update { it.copy(direct = kind, zoomRatio = directZoomRatio(kind, 1f)) }
+        val id = wanted?.second
+        if (id == directCameraId && directTexture === directTextureUsed) return id != null
+        closeDirect()
+        directCameraId = id
+        directTextureUsed = directTexture
+        if (id == null) return false
+        releaseCameraX()
+        val texture = directTexture ?: return true
+        _state.update { it.copy(status = SessionStatus.OPENING) }
+        directJob = scope.launch {
+            val camera = try {
+                DirectCamera(app, id)
+            } catch (e: DirectCameraException) {
+                directFailed(e)
+                return@launch
+            }
+            directCamera = camera
+            try {
+                texture.setDefaultBufferSize(camera.previewSize.width, camera.previewSize.height)
+                camera.open(Surface(texture))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: DirectCameraException) {
+                directFailed(e)
+                return@launch
+            }
+            _state.update { it.copy(status = SessionStatus.READY, errorMessage = null, exposureIndex = 0) }
+            camera.failed.first { it }
+            directFailed(DirectCameraException("camera $id lost"))
+        }
+        return true
+    }
+
+    /** The chip's zoom while the hidden camera shows at [zoom] of its own. */
+    private fun directZoomRatio(kind: DirectKind?, zoom: Float): Float = when (kind) {
+        DirectKind.ULTRA_WIDE -> (ultraWideZoom ?: 1f) * zoom
+        DirectKind.MACRO -> zoom
+        null -> _state.value.zoomRatio
+    }
+
+    private fun closeDirect() {
+        directJob?.cancel()
+        directJob = null
+        directCamera?.close()
+        directCamera = null
+        directCameraId = null
+        directTextureUsed = null
+    }
+
+    /** CameraX lets go of the camera so the hidden one can open; CameraX closes it on its own thread. */
+    private fun releaseCameraX() {
+        bindJob?.cancel()
+        zoomJob?.cancel()
+        // Its zoom and state would otherwise keep overwriting what the hidden camera shows.
+        cameraObservers?.cancel()
+        cameraObservers = null
+        stopPortraitPreview()
+        stopPreRoll()
+        provider?.unbindAll()
+        camera = null
+        boundKey = null
+        imageCapture = null
+        videoCapture = null
+        imageAnalysis = null
+    }
+
+    private fun directFailed(error: Exception) {
+        Log.e(TAG, "The hidden camera failed; back to the listed ones", error)
+        hiddenBroken = true
+        ultraWideOn = false
+        closeDirect()
+        _state.update { state ->
+            state.copy(direct = null, capabilities = state.capabilities?.copy(ultraWideZoom = null))
+        }
+        _events.tryEmit(SessionEvent.CaptureFailed(app.getString(R.string.hidden_camera_failed)))
+        requestBind()
+    }
+
+    /** A still from the hidden camera: self-timer, sound, JPEG turned for the phone's hold, saved as a photo. */
+    private fun takeDirectPhoto(camera: DirectCamera) {
+        _state.update { it.copy(busy = true) }
+        photoJob = scope.launch {
+            val file = withContext(Dispatchers.IO) { File.createTempFile(TEMP_DIRECT_PREFIX, ".jpg", app.cacheDir) }
+            try {
+                for (remaining in settings.timer.seconds downTo 1) {
+                    _state.update { it.copy(countdown = remaining) }
+                    delay(COUNTDOWN_STEP_MS)
+                }
+                _state.update { it.copy(countdown = null) }
+                val capturedAt = System.currentTimeMillis()
+                val location = async {
+                    if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
+                }
+                playSound(MediaActionSound.SHUTTER_CLICK)
+                camera.capture(file, jpegOrientation(camera.sensorOrientation, targetRotation))
+                val uri = withContext(Dispatchers.IO) { writer.savePhoto(file, capturedAt, location.await()) }
+                val media = SavedMedia(uri, MediaKind.PHOTO)
+                _state.update { it.copy(lastCapture = media.uri) }
+                _events.tryEmit(SessionEvent.Saved(media, null))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Capture from the hidden camera failed", e)
+                _events.tryEmit(SessionEvent.CaptureFailed(e.message ?: e.javaClass.simpleName))
+            } finally {
+                withContext(NonCancellable + Dispatchers.IO) { file.delete() }
+                _state.update { it.copy(busy = false, countdown = null) }
+                requestBind()
+            }
+        }
+    }
+
     /** Turns Macro on or off; it takes effect in the back camera's Photo mode. */
     fun setMacro(on: Boolean) {
         if (isLocked()) return
@@ -467,8 +665,8 @@ class CameraSession(
         val setup = macroSetup ?: return null
         return when {
             setup is MacroSetup.Lens && macroLensBroken -> MacroSetup.Zoomed(MACRO_ZOOM)
-            // Not bound through CameraX; until the direct path takes it, Macro zooms.
-            setup is MacroSetup.Hidden -> MacroSetup.Zoomed(MACRO_ZOOM)
+            // Opened through Camera2 instead; zooms once that failed.
+            setup is MacroSetup.Hidden -> if (hiddenBroken) MacroSetup.Zoomed(MACRO_ZOOM) else null
             else -> setup
         }
     }
@@ -492,6 +690,11 @@ class CameraSession(
     /** Multiplies the zoom by [scaleFactor] (pinch); stops a running glide so the fingers win. */
     fun zoomBy(scaleFactor: Float) {
         if (_state.value.panorama != null) return
+        directCamera?.let { direct ->
+            direct.setZoom(direct.zoomRatio * scaleFactor)
+            _state.update { it.copy(zoomRatio = directZoomRatio(it.direct, direct.zoomRatio)) }
+            return
+        }
         val camera = camera ?: return
         val zoom = camera.cameraInfo.zoomState.value ?: return
         zoomJob?.cancel()
@@ -507,6 +710,15 @@ class CameraSession(
     fun focusAt(x: Float, y: Float) {
         // Re-metering mid-sweep shows as a brightness band and refocusing changes the scale.
         if (_state.value.panorama != null) return
+        directCamera?.let { direct ->
+            val (left, top, width, height) = directBounds
+            if (width <= 0f || height <= 0f) return
+            val u = (x - left) / width
+            val v = (y - top) / height
+            // The bands above and below the 4:3 preview show nothing to focus on.
+            if (u in 0f..1f && v in 0f..1f) direct.focusAt(u, v)
+            return
+        }
         val camera = camera ?: return
         val factory = target?.meteringFactory ?: return
         val action = FocusMeteringAction.Builder(
@@ -522,6 +734,12 @@ class CameraSession(
 
     fun setExposureIndex(index: Int) {
         if (_state.value.panorama != null) return
+        directCamera?.let { direct ->
+            val clamped = index.coerceIn(direct.exposureRange)
+            direct.setExposure(clamped)
+            _state.update { it.copy(exposureIndex = clamped) }
+            return
+        }
         val camera = camera ?: return
         val range = _state.value.capabilities?.exposureRange ?: return
         val clamped = index.coerceIn(range)
@@ -554,10 +772,12 @@ class CameraSession(
             return
         }
         val current = _state.value
-        val imageCapture = imageCapture
-        if (current.status != SessionStatus.READY || current.busy || current.recording != null || imageCapture == null) {
+        if (current.status != SessionStatus.READY || current.busy || current.recording != null) return
+        directCamera?.let {
+            takeDirectPhoto(it)
             return
         }
+        val imageCapture = imageCapture ?: return
         _state.update { it.copy(busy = true) }
         photoJob = scope.launch {
             try {
@@ -962,8 +1182,9 @@ class CameraSession(
 
     /** Rebinds when the binding-relevant settings changed; postponed while a capture or recording runs. */
     private fun requestBind() {
-        val target = target ?: return
         if (!settingsLoaded || isLocked()) return
+        if (updateDirect()) return
+        val target = target ?: return
         val key = bindingKey(target)
         if (key == boundKey && camera != null) return
         bindJob?.cancel()
@@ -1007,7 +1228,11 @@ class CameraSession(
             extensions,
             hasRotationVector = panoramaCapture.available,
             customPortrait = customPortraitAvailable(),
-        ).copy(lenses = lenses, macro = macroSetup.takeIf { cameraInfo.lensFacing == CameraSelector.LENS_FACING_BACK })
+        ).copy(
+            lenses = lenses,
+            macro = macroSetup.takeIf { cameraInfo.lensFacing == CameraSelector.LENS_FACING_BACK },
+            ultraWideZoom = ultraWideZoom.takeIf { cameraInfo.lensFacing == CameraSelector.LENS_FACING_BACK && !hiddenBroken },
+        )
         val lensFacing = cameraInfo.lensFacing
 
         // A stored mode or HDR this camera cannot do (other phone, front camera) is dropped; the settings
@@ -1229,8 +1454,11 @@ class CameraSession(
         requestedZoomRatio = bound.cameraInfo.zoomState.value?.zoomRatio ?: 1f
         val macro = key.macro
         bound.cameraInfo.zoomState.value?.let { zoom ->
+            val pending = pendingZoom
+            pendingZoom = null
             when {
                 macro is MacroSetup.Zoomed -> applyZoom(bound, macro.zoomRatio.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio))
+                pending != null -> applyZoom(bound, pending.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio))
                 wasZoomedMacro -> applyZoom(bound, 1f.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio))
             }
         }
@@ -1443,8 +1671,12 @@ class CameraSession(
         val lenses = readLenses(app).filter { it.hidden || it.cameraId in openable }
         val defaultBack = provider.availableCameraInfos.firstOrNull { it.lensFacing == CameraSelector.LENS_FACING_BACK }
         if (defaultBack != null) {
-            macroSetup = chooseMacro(Camera2CameraInfo.from(defaultBack).cameraId, lenses)
-            Log.i(TAG, "Macro: $macroSetup")
+            val defaultId = Camera2CameraInfo.from(defaultBack).cameraId
+            macroSetup = chooseMacro(defaultId, lenses)
+            ultraWide = ultraWideLens(lenses, defaultId)
+            val main = lenses.firstOrNull { it.cameraId == defaultId && it.physicalId == null }
+            ultraWideZoom = ultraWide?.let { wide -> main?.let { zoomLabelRatio(wide, it) } }
+            Log.i(TAG, "Macro: $macroSetup, ultra-wide: $ultraWide at $ultraWideZoom")
         }
         return lenses
     }
@@ -1530,6 +1762,7 @@ class CameraSession(
         const val FOCUS_AUTO_CANCEL_SECONDS = 3L
         const val FPS_60 = 60
         const val PROBE_LIMIT_MS = 15_000L
+        const val TEMP_DIRECT_PREFIX = "direct_"
         const val CAMERA_CLOSE_WAIT_MS = 3_000L
         const val PROBE_RETRY_DELAY_MS = 1_500L
         const val COUNTDOWN_STEP_MS = 1_000L

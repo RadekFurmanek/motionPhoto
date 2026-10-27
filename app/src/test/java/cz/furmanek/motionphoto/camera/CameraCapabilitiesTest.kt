@@ -35,4 +35,11 @@ class CameraCapabilitiesTest {
     fun `no video quality when the camera cannot record`() {
         assertNull(resolveVideoQuality(FHD, emptyList()))
     }
+
+    @Test
+    fun zoomPresetsWithUltraWide() {
+        assertEquals(listOf(0.4f, 1f, 2f, 5f), zoomPresets(1f, 8f, ultraWideZoom = 0.4f))
+        // A logical camera that zooms out itself keeps its own 0.5×.
+        assertEquals(listOf(0.5f, 1f, 2f), zoomPresets(0.5f, 2f, ultraWideZoom = 0.4f))
+    }
 }

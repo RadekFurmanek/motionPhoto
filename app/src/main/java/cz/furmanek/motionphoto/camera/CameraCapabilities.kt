@@ -36,6 +36,8 @@ data class CameraCapabilities(
     val lenses: List<LensInfo> = emptyList(),
     /** How Macro works on this phone; null on the front camera. */
     val macro: MacroSetup? = null,
+    /** The zoom chip of a hidden ultra-wide camera (e.g. 0.5); null when there is none or it failed. */
+    val ultraWideZoom: Float? = null,
 ) {
     val hasOptics: Boolean get() = focalMm > 0f && sensorWidthMm > 0f && sensorHeightMm > 0f
 }
@@ -44,9 +46,16 @@ private val ZOOM_STEPS = listOf(1f, 2f, 5f, 10f)
 private const val ULTRA_WIDE_PRESET = 0.5f
 private const val ULTRA_WIDE_THRESHOLD = 0.6f
 
-/** 0.5× when the camera zooms out that far, then 1×, 2×, 5×, 10× within range; 1× always. */
-fun zoomPresets(minZoom: Float, maxZoom: Float): List<Float> {
-    val ultraWide = if (minZoom <= ULTRA_WIDE_THRESHOLD) listOf(ULTRA_WIDE_PRESET) else emptyList()
+/**
+ * 0.5× when the camera zooms out that far (else the hidden ultra-wide's [ultraWideZoom], if any), then 1×, 2×,
+ * 5×, 10× within range; 1× always.
+ */
+fun zoomPresets(minZoom: Float, maxZoom: Float, ultraWideZoom: Float? = null): List<Float> {
+    val ultraWide = when {
+        minZoom <= ULTRA_WIDE_THRESHOLD -> listOf(ULTRA_WIDE_PRESET)
+        ultraWideZoom != null -> listOf(ultraWideZoom)
+        else -> emptyList()
+    }
     return ultraWide + ZOOM_STEPS.filter { it == 1f || it in minZoom..maxZoom }
 }
 

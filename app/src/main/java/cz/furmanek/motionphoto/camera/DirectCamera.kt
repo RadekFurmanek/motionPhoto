@@ -264,7 +264,8 @@ class DirectCamera(context: Context, val cameraId: String) {
         session = null
         device = null
         reader = null
-        thread.quitSafely()
+        // Camera2 still reports the session and device closing on this thread; let those land first.
+        handler.postDelayed({ thread.quitSafely() }, THREAD_LINGER_MS)
     }
 
     private fun crop(): Rect {
@@ -323,5 +324,6 @@ class DirectCamera(context: Context, val cameraId: String) {
         const val FOCUS_HOLD_MS = 5_000L
         const val METERING_FRACTION = 0.1f
         const val JPEG_QUALITY: Byte = 95
+        const val THREAD_LINGER_MS = 2_000L
     }
 }

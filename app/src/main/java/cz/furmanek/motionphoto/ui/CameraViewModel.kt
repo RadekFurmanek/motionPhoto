@@ -1,6 +1,7 @@
 package cz.furmanek.motionphoto.ui
 
 import android.app.Application
+import android.graphics.SurfaceTexture
 import androidx.camera.core.MeteringPointFactory
 import androidx.camera.core.Preview
 import androidx.compose.ui.graphics.ImageBitmap
@@ -122,7 +123,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun zoomBy(scaleFactor: Float) = session.zoomBy(scaleFactor)
 
-    fun setZoom(ratio: Float) = session.animateZoomTo(ratio)
+    fun setZoom(ratio: Float) = session.selectZoomPreset(ratio)
+
+    fun attachDirectSurface(texture: SurfaceTexture?) = session.attachDirectSurface(texture)
+
+    fun setDirectBounds(left: Float, top: Float, width: Float, height: Float) = session.setDirectBounds(left, top, width, height)
 
     fun setExposureIndex(index: Int) = session.setExposureIndex(index)
 
