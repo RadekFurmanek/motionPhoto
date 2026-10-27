@@ -34,6 +34,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     /** The live portrait's blurred background over the preview; null shows the preview alone. */
     val portraitFrame: Flow<ImageBitmap?> = session.portraitFrame
 
+    /** The custom portrait's background blur, a fraction of the longer side. */
+    val portraitBlur: StateFlow<Float> = session.portraitBlur
+
+    fun setPortraitBlur(fraction: Float) = session.setPortraitBlur(fraction)
+
     fun attachPreview(
         surfaceProvider: Preview.SurfaceProvider,
         displayRotation: Int,

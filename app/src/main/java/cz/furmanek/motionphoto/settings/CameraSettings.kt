@@ -1,5 +1,7 @@
 package cz.furmanek.motionphoto.settings
 
+import cz.furmanek.motionphoto.portrait.PORTRAIT_BLUR_DEFAULT
+
 /** Same values as CameraSelector.LENS_FACING_*; kept here so settings stay free of CameraX. */
 const val LENS_FACING_FRONT = 0
 const val LENS_FACING_BACK = 1
@@ -39,6 +41,8 @@ data class CameraSettings(
     val hdr: Boolean = false,
     val timelapseIntervalMs: Long = 1000L,
     val portraitResolution: PortraitResolution = PortraitResolution.FULL,
+    /** Background blur of a custom portrait, a fraction of the photo's longer side. */
+    val portraitBlur: Float = PORTRAIT_BLUR_DEFAULT,
 )
 
 /**

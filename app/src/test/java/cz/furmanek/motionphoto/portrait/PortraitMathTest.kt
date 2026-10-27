@@ -11,6 +11,15 @@ import org.junit.Test
 class PortraitMathTest {
 
     @Test
+    fun `blur below the range is raised to the minimum`() = assertEquals(0.004f, clampBlur(0f), 0f)
+
+    @Test
+    fun `blur above the range is lowered to the maximum`() = assertEquals(0.03f, clampBlur(1f), 0f)
+
+    @Test
+    fun `blur inside the range is kept`() = assertEquals(0.012f, clampBlur(0.012f), 0f)
+
+    @Test
     fun `a 50 MP sensor is halved to stay near 12 MP`() = assertEquals(2, standardSampleSize(8160, 6120))
 
     @Test

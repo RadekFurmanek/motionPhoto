@@ -8,7 +8,6 @@ import androidx.camera.core.ImageProxy
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import cz.furmanek.motionphoto.panorama.Raster
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
@@ -26,15 +25,24 @@ import kotlinx.coroutines.launch
  * The live portrait viewfinder: analysis frames turned like the preview, their background blurred as the photo
  * will be. [frame] holds only the blurred background, transparent over the subject, so the sharp subject is the
  * live preview underneath. Frames are converted on one worker thread; segmentation runs in [scope].
+ * [blurFraction] is read for every frame, so the preview follows the blur slider at once.
  */
-class PortraitPreview(private val masker: SubjectMasker, private val scope: CoroutineScope) {
+class PortraitPreview(
+    private val masker: SubjectMasker,
+    private val scope: CoroutineScope,
+    private val blurFraction: () -> Float,
+) {
 
     private val _frame = MutableStateFlow<ImageBitmap?>(null)
 
     /** The blurred background to draw over the preview; null draws the preview alone (no mask or no subject). */
     val frame: StateFlow<ImageBitmap?> = _frame.asStateFlow()
 
-    private var worker: ExecutorService? = null
+    /**
+     * One thread for the whole life of this preview (as long as the camera session), so frames of a stopped run
+     * never overlap those of the next one.
+     */
+    private val worker = Executors.newSingleThreadExecutor()
     private var analysis: ImageAnalysis? = null
     @Volatile private var maskJob: Job? = null
 
@@ -51,6 +59,7 @@ class PortraitPreview(private val masker: SubjectMasker, private val scope: Coro
 
     // Touched only on the worker thread.
     private var nextFrameAt = 0L
+    private var nextErrorLogAt = 0L
     @Volatile private var nextMaskAt = 0L
     private val timing = FrameTiming()
     @Volatile private var failureLogged = false
@@ -65,11 +74,14 @@ class PortraitPreview(private val masker: SubjectMasker, private val scope: Coro
             generation++
             running = true
         }
-        val worker = Executors.newSingleThreadExecutor().also { worker = it }
         this.analysis = analysis
-        nextFrameAt = 0L
-        nextMaskAt = 0L
-        failureLogged = false
+        // Reset on the worker, after anything of the earlier run still queued there.
+        worker.execute {
+            nextFrameAt = 0L
+            nextMaskAt = 0L
+            failureLogged = false
+            nextErrorLogAt = 0L
+        }
         analysis.setAnalyzer(worker) { image -> onImage(image, mirrored) }
     }
 
@@ -84,8 +96,6 @@ class PortraitPreview(private val masker: SubjectMasker, private val scope: Coro
         }
         analysis?.clearAnalyzer()
         analysis = null
-        worker?.shutdown()
-        worker = null
         maskJob?.cancel()
         maskJob = null
     }
@@ -108,7 +118,7 @@ class PortraitPreview(private val masker: SubjectMasker, private val scope: Coro
             if (wantsFrame && current != null) {
                 // On schedule rather than 50 ms after the last frame: a 30 fps camera would otherwise give 15.
                 nextFrameAt = if (now - nextFrameAt >= FRAME_INTERVAL_MS) now + FRAME_INTERVAL_MS else nextFrameAt + FRAME_INTERVAL_MS
-                val blurred = boxBlur(small, blurRadius(max(small.width, small.height), BACKGROUND_BLUR))
+                val blurred = boxBlur(small, blurRadius(max(small.width, small.height), clampBlur(blurFraction())))
                 val blurredAt = SystemClock.elapsedRealtimeNanos()
                 val layer = backgroundLayer(blurred, alphaFor(current, small.width, small.height))
                 val bitmap = Bitmap.createBitmap(layer, small.width, small.height, Bitmap.Config.ARGB_8888)
@@ -118,8 +128,12 @@ class PortraitPreview(private val masker: SubjectMasker, private val scope: Coro
                 timing.add(converted - started, blurredAt - converted, SystemClock.elapsedRealtimeNanos() - blurredAt, now)
             }
         } catch (e: Exception) {
-            // The next frame is tried instead; a bad one must not break the viewfinder.
-            Log.e(TAG, "Drawing a portrait preview frame failed", e)
+            // The next frame is tried instead; a bad one must not break the viewfinder. Logged now and then,
+            // as a failure tends to repeat on every frame.
+            if (now >= nextErrorLogAt) {
+                nextErrorLogAt = now + LOG_INTERVAL_MS
+                Log.e(TAG, "Drawing a portrait preview frame failed", e)
+            }
         }
     }
 
@@ -169,16 +183,16 @@ class PortraitPreview(private val masker: SubjectMasker, private val scope: Coro
                 val result = masker.mask(bitmap)
                 if (result == null) {
                     // The model is still downloading: ask again later, not every frame.
-                    nextMaskAt = SystemClock.elapsedRealtime() + RETRY_INTERVAL_MS
+                    retryLater(run)
                 } else if (hasSubject(result.confidence)) {
                     next = feathered(result)
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                segmentationFailed(e)
+                segmentationFailed(e, run)
             } catch (e: LinkageError) {
-                segmentationFailed(e)
+                segmentationFailed(e, run)
             } finally {
                 synchronized(lock) {
                     if (run == generation) {
@@ -192,14 +206,19 @@ class PortraitPreview(private val masker: SubjectMasker, private val scope: Coro
     }
 
     /** Retried later; the stack trace is logged once per run, as a failing model fails every time. */
-    private fun segmentationFailed(e: Throwable) {
-        nextMaskAt = SystemClock.elapsedRealtime() + RETRY_INTERVAL_MS
+    private fun segmentationFailed(e: Throwable, run: Int) {
+        retryLater(run)
         if (failureLogged) {
             Log.w(TAG, "Segmenting a preview frame failed again: $e")
         } else {
             failureLogged = true
             Log.w(TAG, "Segmenting a preview frame failed", e)
         }
+    }
+
+    /** Puts off the next segmentation; not when [run] is over, as that would hold up the first mask of the next run. */
+    private fun retryLater(run: Int) {
+        synchronized(lock) { if (run == generation) nextMaskAt = SystemClock.elapsedRealtime() + RETRY_INTERVAL_MS }
     }
 
     private fun feathered(mask: Mask): Mask {

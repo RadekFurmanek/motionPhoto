@@ -56,6 +56,7 @@ import cz.furmanek.motionphoto.portrait.MlKitSubjectMasker
 import cz.furmanek.motionphoto.portrait.PortraitOutcome
 import cz.furmanek.motionphoto.portrait.PortraitPreview
 import cz.furmanek.motionphoto.portrait.PortraitProcessor
+import cz.furmanek.motionphoto.portrait.clampBlur
 import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.FlashSetting
@@ -207,6 +208,14 @@ class CameraSession(
     /** The analysis stream [portraitPreview] draws from; null while it is stopped. */
     private var portraitAnalysis: ImageAnalysis? = null
 
+    /**
+     * The custom portrait's background blur: set at once by [setPortraitBlur], so the live preview follows the
+     * slider without waiting for the settings store, which follows behind.
+     */
+    private val _portraitBlur = MutableStateFlow(CameraSettings().portraitBlur)
+    val portraitBlur: StateFlow<Float> = _portraitBlur.asStateFlow()
+    private var portraitBlurWrite: Job? = null
+
     /** The custom portrait's blurred background, drawn over the preview; null shows the preview alone. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val portraitFrame: Flow<ImageBitmap?> = portraitPreview.flatMapLatest { it?.frame ?: flowOf(null) }
@@ -272,6 +281,8 @@ class CameraSession(
                 if (_state.value.panorama?.capturing == true && endsPanorama(settings, new)) cancelPanorama()
                 settings = new
                 settingsLoaded = true
+                // While the slider's writes are still landing, older values must not pull it back.
+                if (portraitBlurWrite?.isActive != true) _portraitBlur.value = new.portraitBlur
                 applyCameraControls()
                 requestBind()
             }
@@ -389,6 +400,15 @@ class CameraSession(
         _state.update { it.copy(exposureIndex = clamped) }
     }
 
+    /** The custom portrait's background blur, a fraction of the longer side; the live preview follows at once. */
+    fun setPortraitBlur(fraction: Float) {
+        val clamped = clampBlur(fraction)
+        _portraitBlur.value = clamped
+        // Only the latest value matters: a write not yet started is dropped for the newer one.
+        portraitBlurWrite?.cancel()
+        portraitBlurWrite = scope.launch { settingsRepository.update { it.copy(portraitBlur = clamped) } }
+    }
+
     /** Orientation photos and videos are saved in, as a [Surface] rotation; held while a capture runs. */
     fun setTargetRotation(rotation: Int) {
         targetRotation = rotation
@@ -444,9 +464,10 @@ class CameraSession(
         when {
             settings.mode == CaptureMode.PORTRAIT && customPortraitBound -> {
                 val resolution = settings.portraitResolution
+                val blur = _portraitBlur.value
                 var outcome = PortraitOutcome.FAILED
                 val media = photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location) { file ->
-                    outcome = portraitProcessor.process(file, resolution)
+                    outcome = portraitProcessor.process(file, resolution, blur)
                 }
                 Shot(media, portraitNotice(outcome)?.let(app::getString))
             }
@@ -1054,7 +1075,7 @@ class CameraSession(
             return
         }
         if (portraitAnalysis === analysis) return
-        val preview = portraitPreview.value ?: PortraitPreview(subjectMasker, scope).also { portraitPreview.value = it }
+        val preview = portraitPreview.value ?: PortraitPreview(subjectMasker, scope) { _portraitBlur.value }.also { portraitPreview.value = it }
         // The preview shows a front camera mirrored, whatever the saved photos do.
         preview.start(analysis, mirrored = _state.value.lensFacing == LENS_FACING_FRONT)
         portraitAnalysis = analysis
@@ -1115,10 +1136,14 @@ class CameraSession(
                     val error = cameraState.error
                     if (error != null) {
                         _state.update { it.copy(status = SessionStatus.ERROR, errorMessage = describe(error.code)) }
+                        // A stale blurred frame must not stay over the preview; it starts again once the camera opens.
+                        stopPortraitPreview()
                         // The Recorder ends a video on its own; a time-lapse keeps what it has.
                         if (_state.value.recording?.kind == RecordingKind.TIMELAPSE) stopTimelapse()
                     } else if (cameraState.type == CameraState.Type.OPEN) {
                         _state.update { it.copy(status = SessionStatus.READY, errorMessage = null) }
+                        // Back from an error without a new bind: the live portrait starts again.
+                        updatePortraitPreview()
                     }
                 }
             }

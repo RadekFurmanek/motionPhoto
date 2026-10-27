@@ -77,12 +77,14 @@ import cz.furmanek.motionphoto.camera.SessionEvent
 import cz.furmanek.motionphoto.camera.SessionStatus
 import cz.furmanek.motionphoto.camera.availableModes
 import cz.furmanek.motionphoto.camera.isVideo
+import cz.furmanek.motionphoto.camera.usesCustomPortrait
 import cz.furmanek.motionphoto.camera.zoomPresets
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
 import cz.furmanek.motionphoto.timelapse.timelapseOutputDurationMs
 import cz.furmanek.motionphoto.settings.effectiveLivePhoto
+import cz.furmanek.motionphoto.ui.components.BlurSlider
 import cz.furmanek.motionphoto.ui.components.ExposureSlider
 import cz.furmanek.motionphoto.ui.components.GridOverlay
 import cz.furmanek.motionphoto.ui.components.LastCaptureThumbnail
@@ -182,6 +184,15 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
         delay(EXPOSURE_SLIDER_VISIBLE_MS)
         exposureVisible = false
     }
+    // Held in PORTRÉT with our own portrait: the maker's bokeh has no strength to set.
+    var blurInteraction by remember { mutableIntStateOf(0) }
+    var blurVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(blurInteraction) {
+        delay(EXPOSURE_SLIDER_VISIBLE_MS)
+        blurVisible = false
+    }
+    val customPortrait = capabilities != null && usesCustomPortrait(settings.mode, capabilities)
+    val canAdjustBlur = customPortrait && !state.busy && state.panorama == null
     val exposureRange = capabilities?.exposureRange
     val canAdjustExposure = exposureRange != null && exposureRange.first < exposureRange.last
 
@@ -199,12 +210,23 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(viewModel) {
-                    detectTapGestures { offset ->
+                .pointerInput(viewModel, canAdjustBlur) {
+                    detectTapGestures(
+                        onLongPress = if (canAdjustBlur) {
+                            {
+                                exposureVisible = false
+                                blurVisible = true
+                                blurInteraction++
+                            }
+                        } else {
+                            null
+                        },
+                    ) { offset ->
                         // Re-metering during a panorama would show in the stitched result.
                         if (state.panorama != null) return@detectTapGestures
                         focusPoint = offset
                         focusTapCount++
+                        blurVisible = false
                         exposureVisible = true
                         exposureInteraction++
                         viewModel.focusAt(offset.x, offset.y)
@@ -270,7 +292,14 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 .padding(bottom = 16.dp),
             viewModel = viewModel,
             exposureSlider = {
-                if (exposureVisible && canAdjustExposure && state.panorama == null) {
+                if (blurVisible && canAdjustBlur) {
+                    val blur by viewModel.portraitBlur.collectAsStateWithLifecycle()
+                    BlurSlider(
+                        fraction = blur,
+                        onChange = viewModel::setPortraitBlur,
+                        onInteraction = { blurInteraction++ },
+                    )
+                } else if (exposureVisible && canAdjustExposure && state.panorama == null) {
                     ExposureSlider(
                         index = state.exposureIndex,
                         range = exposureRange,

@@ -42,6 +42,7 @@
     <string name="resume">Pokračovat</string>
     <string name="last_capture">Poslední snímek</string>
     <string name="exposure">Expozice</string>
+    <string name="portrait_blur">Rozostření</string>
     <string name="back">Zpět</string>
     <string name="settings_grid">Mřížka</string>
     <string name="settings_location">Ukládat polohu</string>

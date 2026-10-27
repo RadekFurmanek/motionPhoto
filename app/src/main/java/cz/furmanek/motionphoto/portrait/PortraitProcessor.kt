@@ -24,8 +24,11 @@ enum class PortraitOutcome { PORTRAIT, NO_SUBJECT, MODEL_MISSING, OUT_OF_MEMORY,
 /** Blurs the background of a photo behind the subject that [masker] finds. */
 class PortraitProcessor(private val masker: SubjectMasker) {
 
-    /** Rewrites [jpeg] in place as a portrait; for any outcome but [PortraitOutcome.PORTRAIT] it is left untouched. */
-    suspend fun process(jpeg: File, resolution: PortraitResolution): PortraitOutcome = withContext(Dispatchers.Default) {
+    /**
+     * Rewrites [jpeg] in place as a portrait with the background blurred by [blurFraction] of its longer side;
+     * for any outcome but [PortraitOutcome.PORTRAIT] it is left untouched.
+     */
+    suspend fun process(jpeg: File, resolution: PortraitResolution, blurFraction: Float): PortraitOutcome = withContext(Dispatchers.Default) {
         var photo: Bitmap? = null
         var small: Bitmap? = null
         var temp: File? = null
@@ -51,7 +54,7 @@ class PortraitProcessor(private val masker: SubjectMasker) {
             val longest = max(maskWidth, maskHeight)
             val soft = blurMask(confidence, maskWidth, maskHeight, blurRadius(longest, MASK_FEATHER))
 
-            val background = boxBlur(Raster(maskWidth, maskHeight, smallPixels), blurRadius(longest, BACKGROUND_BLUR)).pixels
+            val background = boxBlur(Raster(maskWidth, maskHeight, smallPixels), blurRadius(longest, clampBlur(blurFraction))).pixels
 
             ensureActive()
             composite(photo, soft, background, maskWidth, maskHeight)

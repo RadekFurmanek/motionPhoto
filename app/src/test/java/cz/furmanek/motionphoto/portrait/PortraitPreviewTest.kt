@@ -117,8 +117,8 @@ class PortraitPreviewTest {
     @Test
     fun `preview and photo blur the same fraction of the frame`() {
         // A 480 px preview and a 1024 px photo mask: both 1.2 % of the longer side.
-        assertEquals(6, blurRadius(480, BACKGROUND_BLUR))
-        assertEquals(12, blurRadius(1024, BACKGROUND_BLUR))
+        assertEquals(6, blurRadius(480, PORTRAIT_BLUR_DEFAULT))
+        assertEquals(12, blurRadius(1024, PORTRAIT_BLUR_DEFAULT))
         assertEquals(3, blurRadius(256, MASK_FEATHER))
     }
 }

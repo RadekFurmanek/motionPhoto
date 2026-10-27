@@ -16,11 +16,18 @@ fun standardSampleSize(width: Int, height: Int): Int {
 }
 
 /**
- * Mask feathering and background blur radii as fractions of the longer side of the image they are applied
+ * Mask feathering and background blur radii are fractions of the longer side of the image they are applied
  * to; the photo and the live preview share them, so the preview shows the blur the photo will get.
  */
 const val MASK_FEATHER = 0.01f
-const val BACKGROUND_BLUR = 0.012f
+
+/** The range and default of the user's background blur, a fraction of the longer side like [MASK_FEATHER]. */
+const val PORTRAIT_BLUR_MIN = 0.004f
+const val PORTRAIT_BLUR_MAX = 0.03f
+const val PORTRAIT_BLUR_DEFAULT = 0.012f
+
+/** [fraction] kept within [PORTRAIT_BLUR_MIN]..[PORTRAIT_BLUR_MAX]. */
+fun clampBlur(fraction: Float): Float = fraction.coerceIn(PORTRAIT_BLUR_MIN, PORTRAIT_BLUR_MAX)
 
 /** A blur radius of [fraction] of [longestSide] pixels, at least 1. */
 fun blurRadius(longestSide: Int, fraction: Float): Int = max(1, (longestSide * fraction).roundToInt())
