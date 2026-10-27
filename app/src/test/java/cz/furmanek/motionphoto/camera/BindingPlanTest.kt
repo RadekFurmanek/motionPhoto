@@ -1,5 +1,6 @@
 package cz.furmanek.motionphoto.camera
 
+import cz.furmanek.motionphoto.camera.UseCaseKind.ANALYSIS
 import cz.furmanek.motionphoto.camera.UseCaseKind.IMAGE
 import cz.furmanek.motionphoto.camera.UseCaseKind.PREVIEW
 import cz.furmanek.motionphoto.camera.UseCaseKind.VIDEO
@@ -41,6 +42,32 @@ class BindingPlanTest {
                 BindingAttempt(setOf(PREVIEW, VIDEO), videoExtras = false),
             ),
             bindingAttempts(CaptureMode.VIDEO, livePhoto = false, videoExtras = true),
+        )
+    }
+
+    @Test
+    fun `slow motion binds preview and video without fallback`() {
+        assertEquals(
+            listOf(BindingAttempt(setOf(PREVIEW, VIDEO))),
+            bindingAttempts(CaptureMode.SLOW_MOTION, livePhoto = true, videoExtras = true),
+        )
+    }
+
+    @Test
+    fun `portrait and night bind preview and still capture`() {
+        listOf(CaptureMode.PORTRAIT, CaptureMode.NIGHT).forEach { mode ->
+            assertEquals(
+                listOf(BindingAttempt(setOf(PREVIEW, IMAGE))),
+                bindingAttempts(mode, livePhoto = true, videoExtras = true),
+            )
+        }
+    }
+
+    @Test
+    fun `timelapse binds preview and frame analysis`() {
+        assertEquals(
+            listOf(BindingAttempt(setOf(PREVIEW, ANALYSIS))),
+            bindingAttempts(CaptureMode.TIMELAPSE, livePhoto = true, videoExtras = true),
         )
     }
 }

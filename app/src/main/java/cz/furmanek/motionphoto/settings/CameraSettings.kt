@@ -4,7 +4,8 @@ package cz.furmanek.motionphoto.settings
 const val LENS_FACING_FRONT = 0
 const val LENS_FACING_BACK = 1
 
-enum class CaptureMode { PHOTO, VIDEO }
+/** Declaration order is the order of the mode bar. Stored by name, so reordering is safe. */
+enum class CaptureMode { TIMELAPSE, SLOW_MOTION, VIDEO, PHOTO, PORTRAIT, NIGHT, PANORAMA }
 
 enum class FlashSetting { OFF, AUTO, ON }
 
@@ -31,10 +32,21 @@ data class CameraSettings(
     val shutterSound: Boolean = true,
     val volumeKeyShutter: Boolean = true,
     val mirrorFrontCamera: Boolean = false,
+    val slowMotionFps: Int = 120,
+    val hdr: Boolean = false,
+    val timelapseIntervalMs: Long = 1000L,
 )
 
-/** A flash would show in the clip and shift the still within it, so a flash shot is an ordinary photo. */
-fun CameraSettings.effectiveLivePhoto(): Boolean = livePhoto && flash == FlashSetting.OFF
+/**
+ * A flash would show in the clip and shift the still within it, so a flash shot is an ordinary photo.
+ * HDR comes from the maker's Extensions, which cannot record the clip.
+ */
+fun CameraSettings.effectiveLivePhoto(): Boolean = livePhoto && flash == FlashSetting.OFF && !hdr
+
+/** HDR and live photo exclude each other: turning one on turns the other off. */
+fun CameraSettings.withHdr(on: Boolean): CameraSettings = copy(hdr = on, livePhoto = livePhoto && !on)
+
+fun CameraSettings.withLivePhoto(on: Boolean): CameraSettings = copy(livePhoto = on, hdr = hdr && !on)
 
 /** Some countries require the shutter sound; [mustPlay] comes from MediaActionSound.mustPlayShutterSound(). */
 fun CameraSettings.shutterSoundRequired(mustPlay: Boolean): Boolean = shutterSound || mustPlay

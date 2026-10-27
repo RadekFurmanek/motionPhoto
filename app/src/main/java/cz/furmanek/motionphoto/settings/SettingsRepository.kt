@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -38,6 +39,9 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             shutterSound = prefs[Keys.SHUTTER_SOUND] ?: defaults.shutterSound,
             volumeKeyShutter = prefs[Keys.VOLUME_KEY_SHUTTER] ?: defaults.volumeKeyShutter,
             mirrorFrontCamera = prefs[Keys.MIRROR_FRONT] ?: defaults.mirrorFrontCamera,
+            slowMotionFps = prefs[Keys.SLOW_MOTION_FPS] ?: defaults.slowMotionFps,
+            hdr = prefs[Keys.HDR] ?: defaults.hdr,
+            timelapseIntervalMs = prefs[Keys.TIMELAPSE_INTERVAL] ?: defaults.timelapseIntervalMs,
         )
     }
 
@@ -57,6 +61,9 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         prefs[Keys.SHUTTER_SOUND] = settings.shutterSound
         prefs[Keys.VOLUME_KEY_SHUTTER] = settings.volumeKeyShutter
         prefs[Keys.MIRROR_FRONT] = settings.mirrorFrontCamera
+        prefs[Keys.SLOW_MOTION_FPS] = settings.slowMotionFps
+        prefs[Keys.HDR] = settings.hdr
+        prefs[Keys.TIMELAPSE_INTERVAL] = settings.timelapseIntervalMs
     }
 
     private inline fun <reified E : Enum<E>> Preferences.enum(key: Preferences.Key<String>, default: E): E =
@@ -78,5 +85,8 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val SHUTTER_SOUND = booleanPreferencesKey("shutter_sound")
         val VOLUME_KEY_SHUTTER = booleanPreferencesKey("volume_key_shutter")
         val MIRROR_FRONT = booleanPreferencesKey("mirror_front")
+        val SLOW_MOTION_FPS = intPreferencesKey("slow_motion_fps")
+        val HDR = booleanPreferencesKey("hdr")
+        val TIMELAPSE_INTERVAL = longPreferencesKey("timelapse_interval_ms")
     }
 }

@@ -2,6 +2,7 @@ package cz.furmanek.motionphoto.ui.components
 
 import androidx.annotation.StringRes
 import cz.furmanek.motionphoto.R
+import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.PhotoAspect
 import cz.furmanek.motionphoto.settings.VideoQualitySetting
 
@@ -21,8 +22,10 @@ fun PhotoAspect.labelRes(): Int = when (this) {
 }
 
 /** Width / height of the saved frame as shown in portrait. */
-fun outputAspect(isVideo: Boolean, aspect: PhotoAspect): Float = when {
-    isVideo || aspect == PhotoAspect.RATIO_16_9 -> 9f / 16f
+fun outputAspect(mode: CaptureMode, aspect: PhotoAspect): Float = when {
+    mode == CaptureMode.VIDEO || mode == CaptureMode.SLOW_MOTION || mode == CaptureMode.TIMELAPSE -> 9f / 16f
+    mode == CaptureMode.PORTRAIT || mode == CaptureMode.NIGHT -> 3f / 4f
+    aspect == PhotoAspect.RATIO_16_9 -> 9f / 16f
     aspect == PhotoAspect.RATIO_1_1 -> 1f
     else -> 3f / 4f
 }

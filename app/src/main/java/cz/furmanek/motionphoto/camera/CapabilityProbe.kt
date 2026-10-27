@@ -1,5 +1,6 @@
 package cz.furmanek.motionphoto.camera
 
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
@@ -9,7 +10,10 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.DynamicRange
 import androidx.camera.core.Preview
 import androidx.camera.core.SessionConfig
+import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.HighSpeedVideoSessionConfig
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
@@ -20,8 +24,18 @@ import cz.furmanek.motionphoto.settings.VideoQualitySetting
 object CapabilityProbe {
 
     private const val FPS_60 = 60
+    private const val TAG = "CapabilityProbe"
 
-    fun probe(provider: ProcessCameraProvider, cameraInfo: CameraInfo): CameraCapabilities {
+    private val SLOW_MOTION_RATES = listOf(120, 240)
+    private val EXTENSION_MODES = listOf(ExtensionMode.BOKEH, ExtensionMode.NIGHT, ExtensionMode.HDR)
+
+    /** [extensions] is null when the maker offers no Extensions or they failed to load. */
+    fun probe(
+        provider: ProcessCameraProvider,
+        cameraInfo: CameraInfo,
+        selector: CameraSelector,
+        extensions: ExtensionsManager?,
+    ): CameraCapabilities {
         val videoCapabilities = Recorder.getVideoCapabilities(cameraInfo)
         val qualities = videoCapabilities.getSupportedQualities(DynamicRange.SDR)
             .mapNotNull(::toSetting)
@@ -44,8 +58,47 @@ object CapabilityProbe {
             backLenses = backLenses(provider),
             hasFrontCamera = provider.hasCameraSafely(CameraSelector.DEFAULT_FRONT_CAMERA),
             hasBackCamera = provider.hasCameraSafely(CameraSelector.DEFAULT_BACK_CAMERA),
+            slowMotionFps = optional("slow motion") {
+                SLOW_MOTION_RATES.filterTo(mutableSetOf()) { slowMotionQuality(cameraInfo, it) != null }
+            },
+            extensionModes = optional("extensions") {
+                EXTENSION_MODES.filterTo(mutableSetOf()) { extensions?.isExtensionAvailable(selector, it) == true }
+            },
         )
     }
+
+    /**
+     * The highest high-speed quality that records at [fps], or null. Phones often reach 240 fps only
+     * at a lower resolution than 120 fps.
+     */
+    fun slowMotionQuality(cameraInfo: CameraInfo, fps: Int): Quality? {
+        val qualities = try {
+            Recorder.getHighSpeedVideoCapabilities(cameraInfo)?.getSupportedQualities(DynamicRange.SDR).orEmpty()
+        } catch (_: IllegalArgumentException) {
+            emptyList()
+        }
+        // CameraX lists qualities from the largest to the smallest.
+        return qualities.firstOrNull { quality ->
+            val video = VideoCapture.withOutput(Recorder.Builder().setQualitySelector(QualitySelector.from(quality)).build())
+            try {
+                val ranges = cameraInfo.getSupportedFrameRateRanges(HighSpeedVideoSessionConfig(video, Preview.Builder().build()))
+                supportsFixedRate(ranges.map { it.lower to it.upper }, fps)
+            } catch (_: IllegalArgumentException) {
+                false
+            } catch (_: IllegalStateException) {
+                false
+            }
+        }
+    }
+
+    /** Optional features must never break plain Photo and Video: any failure while probing them means "none". */
+    private inline fun optional(feature: String, probe: () -> Set<Int>): Set<Int> =
+        try {
+            probe()
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Probing $feature failed", e)
+            emptySet()
+        }
 
     fun toQuality(setting: VideoQualitySetting): Quality = when (setting) {
         VideoQualitySetting.SD -> Quality.SD

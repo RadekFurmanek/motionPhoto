@@ -4,6 +4,7 @@ import android.app.Application
 import android.media.MediaActionSound
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import android.util.Rational
 import android.view.Surface
@@ -12,9 +13,11 @@ import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.MeteringPointFactory
 import androidx.camera.core.MirrorMode
@@ -24,7 +27,10 @@ import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.extensions.ExtensionsManager
+import androidx.camera.extensions.ExtensionMode
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.HighSpeedVideoSessionConfig
 import androidx.camera.lifecycle.awaitInstance
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.QualitySelector
@@ -49,6 +55,8 @@ import cz.furmanek.motionphoto.settings.SettingsRepository
 import cz.furmanek.motionphoto.settings.VideoQualitySetting
 import cz.furmanek.motionphoto.settings.effectiveLivePhoto
 import cz.furmanek.motionphoto.settings.shutterSoundRequired
+import cz.furmanek.motionphoto.timelapse.TimelapseOutcome
+import cz.furmanek.motionphoto.timelapse.classifyTimelapse
 import cz.furmanek.motionphoto.location.LocationProvider
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
@@ -70,7 +78,16 @@ import kotlinx.coroutines.withContext
 
 enum class SessionStatus { CLOSED, OPENING, READY, ERROR }
 
-data class RecordingState(val durationNanos: Long, val paused: Boolean, val withAudio: Boolean)
+enum class RecordingKind { VIDEO, TIMELAPSE }
+
+data class RecordingState(
+    val durationNanos: Long,
+    val paused: Boolean,
+    val withAudio: Boolean,
+    val kind: RecordingKind = RecordingKind.VIDEO,
+    /** Time-lapse frames recorded so far. */
+    val frames: Int = 0,
+)
 
 data class SessionState(
     val status: SessionStatus = SessionStatus.CLOSED,
@@ -132,10 +149,15 @@ class CameraSession(
     private var settings = CameraSettings()
     private var settingsLoaded = false
     private var provider: ProcessCameraProvider? = null
+    private var extensionsManager: ExtensionsManager? = null
+    private var extensionsLoaded = false
     private var camera: Camera? = null
     private var preview: Preview? = null
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
+    private var imageAnalysis: ImageAnalysis? = null
+    private val timelapseRecorder = TimelapseRecorder(app)
+    private var timelapseClock: Job? = null
     private var target: PreviewTarget? = null
     private var boundKey: BindingKey? = null
     private var bindJob: Job? = null
@@ -143,6 +165,10 @@ class CameraSession(
     private var cameraObservers: Job? = null
     private var zoomJob: Job? = null
     private val uiVisibility = UiVisibility()
+    private val discardingPreview = DiscardingSurfaceProvider()
+
+    /** What the bound Preview currently draws into (CameraX keeps its getter internal). */
+    private var routedProvider: Preview.SurfaceProvider? = null
     private val uiVisible: Boolean get() = uiVisibility.anyVisible
     private var selectedBackCameraId: String? = null
     private var targetRotation = Surface.ROTATION_0
@@ -168,10 +194,14 @@ class CameraSession(
         val mirrorFrontCamera: Boolean,
         val displayRotation: Int,
         val portrait: Boolean,
+        val hdr: Boolean,
+        val slowMotionFps: Int,
     )
 
     init {
-        scope.launch(Dispatchers.IO) { PhotoCapture.deleteTempFiles(app.cacheDir) }
+        scope.launch(Dispatchers.IO) {
+            PhotoCapture.deleteTempFiles(app.cacheDir)
+        }
         scope.launch {
             val latest = withContext(Dispatchers.IO) { runCatching { writer.latestOwnCapture() }.getOrNull() }
             if (latest != null) _state.update { it.copy(lastCapture = it.lastCapture ?: latest) }
@@ -193,7 +223,7 @@ class CameraSession(
         meteringFactory: MeteringPointFactory,
     ) {
         target = PreviewTarget(surfaceProvider, displayRotation, portrait, meteringFactory)
-        preview?.surfaceProvider = surfaceProvider
+        routePreview()
         requestBind()
     }
 
@@ -201,11 +231,12 @@ class CameraSession(
     fun detachPreview(surfaceProvider: Preview.SurfaceProvider) {
         if (target?.surfaceProvider !== surfaceProvider) return
         target = null
-        preview?.surfaceProvider = null
+        routePreview()
     }
 
     fun onUiVisible(visible: Boolean) {
         if (visible) uiVisibility.shown() else uiVisibility.hidden()
+        routePreview()
         // Another screen (capture for another app) may have bound the camera meanwhile, which unbinds ours.
         val preview = preview
         if (visible && preview != null && provider?.isBound(preview) == false) {
@@ -214,6 +245,20 @@ class CameraSession(
         }
         updateLifecycle()
         if (visible) requestBind()
+    }
+
+    /**
+     * Sends preview frames to the screen while it shows, and to [discardingPreview] while a recording runs
+     * in the background: the screen's surface is gone then, and a stream without a consumer stalls the camera.
+     */
+    private fun routePreview() {
+        val preview = preview ?: return
+        val provider = (if (uiVisible) target?.surfaceProvider else null)
+            ?: discardingPreview.takeIf { _state.value.recording != null }
+        if (routedProvider !== provider) {
+            routedProvider = provider
+            preview.surfaceProvider = provider
+        }
     }
 
     /** Switches to a separately exposed back camera (ultra-wide, telephoto); null returns to the default one. */
@@ -332,7 +377,7 @@ class CameraSession(
     /** The shutter of the current mode: photo (or self-timer), or start/stop a video. */
     fun onShutter() {
         when {
-            settings.mode == CaptureMode.PHOTO -> takePhoto()
+            settings.mode.isVideo().not() -> takePhoto()
             _state.value.recording != null -> stopRecording()
             else -> startRecording()
         }
@@ -346,13 +391,16 @@ class CameraSession(
 
     fun startRecording() {
         val current = _state.value
-        val videoCapture = videoCapture
-        if (settings.mode != CaptureMode.VIDEO || current.status != SessionStatus.READY || current.busy ||
-            current.recording != null || videoCapture == null
-        ) {
+        if (!settings.mode.isVideo() || current.status != SessionStatus.READY || current.busy || current.recording != null) {
             return
         }
-        val withAudio = videoRecorder.hasAudioPermission()
+        if (settings.mode == CaptureMode.TIMELAPSE) {
+            startTimelapse()
+            return
+        }
+        val videoCapture = videoCapture ?: return
+        // High-speed sessions record no sound.
+        val withAudio = settings.mode == CaptureMode.VIDEO && videoRecorder.hasAudioPermission()
         val location = if (settings.saveLocation) locationProvider.lastKnownOrNull() else null
         // The service goes first: it must hold the process before the Activity can go away.
         RecordingService.start(app, withAudio)
@@ -373,7 +421,89 @@ class CameraSession(
 
     fun resumeRecording() = videoRecorder.resume()
 
-    fun stopRecording() = videoRecorder.stop()
+    fun stopRecording() {
+        if (_state.value.recording?.kind == RecordingKind.TIMELAPSE) stopTimelapse() else videoRecorder.stop()
+    }
+
+    private fun startTimelapse() {
+        val analysis = imageAnalysis ?: return
+        // No sound in a time-lapse, so the service only needs the camera type.
+        RecordingService.start(app, withAudio = false, timelapse = true)
+        playSound(MediaActionSound.START_VIDEO_RECORDING)
+        val startedAtNs = SystemClock.elapsedRealtimeNanos()
+        val startedAtMillis = System.currentTimeMillis()
+        timelapseRecorder.start(
+            analysis,
+            settings.timelapseIntervalMs,
+            openOutput = { writer.createPendingVideo(startedAtMillis) },
+            onFrame = { frames -> updateRecording { it.copy(frames = frames) } },
+            onEncoderFailed = { if (_state.value.recording?.kind == RecordingKind.TIMELAPSE) stopTimelapse() },
+        )
+        timelapseClock = scope.launch {
+            while (true) {
+                updateRecording { it.copy(durationNanos = SystemClock.elapsedRealtimeNanos() - startedAtNs) }
+                delay(TIMELAPSE_CLOCK_MS)
+            }
+        }
+        _state.update {
+            it.copy(recording = RecordingState(0, paused = false, withAudio = false, kind = RecordingKind.TIMELAPSE))
+        }
+        updateLifecycle()
+    }
+
+    private var timelapseStopping = false
+
+    private fun stopTimelapse() {
+        if (timelapseStopping) return
+        timelapseStopping = true
+        timelapseClock?.cancel()
+        scope.launch {
+            try {
+                val result = timelapseRecorder.stop()
+                val outcome = classifyTimelapse(result.playable, result.frames, result.encoderFailed)
+                val uri = result.uri
+                if (uri == null || outcome == TimelapseOutcome.EMPTY || outcome == TimelapseOutcome.FAILED) {
+                    // Nothing playable: the pending entry would only leave a broken file behind.
+                    if (uri != null) {
+                        withContext(Dispatchers.IO) {
+                            runCatching { writer.discardVideo(uri) }.onFailure { Log.w(TAG, "Discarding $uri failed", it) }
+                        }
+                    }
+                    val empty = outcome == TimelapseOutcome.EMPTY
+                    reportRecordingProblem(app.getString(if (empty) R.string.timelapse_empty else R.string.recording_failed))
+                } else {
+                    withContext(Dispatchers.IO) { writer.publishVideo(uri) }
+                    _state.update { it.copy(lastCapture = uri) }
+                    if (outcome == TimelapseOutcome.SAVED) {
+                        _events.tryEmit(SessionEvent.Saved(SavedMedia(uri, MediaKind.VIDEO)))
+                    } else {
+                        // The encoder broke mid-run; what it wrote before is in the gallery.
+                        _events.tryEmit(SessionEvent.RecordingInterrupted(uri))
+                        if (!uiVisible) RecordingService.notifyResult(app, app.getString(R.string.recording_interrupted))
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Saving the time-lapse failed", e)
+                reportRecordingProblem(app.getString(R.string.recording_failed))
+            } finally {
+                timelapseStopping = false
+                _state.update { it.copy(recording = null) }
+                RecordingService.stop(app)
+                playSound(MediaActionSound.STOP_VIDEO_RECORDING)
+                updateLifecycle()
+                applyTargetRotation()
+                applyCameraControls()
+                requestBind()
+            }
+        }
+    }
+
+    private fun reportRecordingProblem(message: String) {
+        _events.tryEmit(SessionEvent.CaptureFailed(message))
+        if (!uiVisible) RecordingService.notifyResult(app, message)
+    }
 
     private fun onRecordEvent(event: VideoRecordEvent) {
         when (event) {
@@ -441,6 +571,8 @@ class CameraSession(
         mirrorFrontCamera = settings.mirrorFrontCamera,
         displayRotation = target.displayRotation,
         portrait = target.portrait,
+        hdr = settings.hdr,
+        slowMotionFps = settings.slowMotionFps,
     )
 
     /** Rebinds when the binding-relevant settings changed; postponed while a capture or recording runs. */
@@ -472,10 +604,39 @@ class CameraSession(
             return
         }
         val cameraInfo = provider.getCameraInfo(selector)
-        val capabilities = CapabilityProbe.probe(provider, cameraInfo)
+        val extensions = extensions(provider)
+        val capabilities = CapabilityProbe.probe(provider, cameraInfo, selector, extensions)
         val lensFacing = cameraInfo.lensFacing
 
-        val photoAspect = if (key.mode == CaptureMode.VIDEO) AspectRatio.RATIO_16_9 else key.aspect.streamAspect()
+        // A stored mode or HDR this camera cannot do (other phone, front camera) is dropped; the settings
+        // change starts a new bind.
+        val mode = fallbackMode(key.mode, availableModes(capabilities))
+        val hdrAvailable = ExtensionMode.HDR in capabilities.extensionModes
+        if (mode != key.mode || (key.hdr && !hdrAvailable)) {
+            settingsRepository.update { it.copy(mode = mode, hdr = it.hdr && hdrAvailable) }
+            return
+        }
+        if (key.mode == CaptureMode.SLOW_MOTION) {
+            bindSlowMotion(key, target, provider, selector, cameraInfo, capabilities)
+            return
+        }
+        val extensionMode = when {
+            key.mode == CaptureMode.PORTRAIT -> ExtensionMode.BOKEH
+            key.mode == CaptureMode.NIGHT -> ExtensionMode.NIGHT
+            key.mode == CaptureMode.PHOTO && key.hdr -> ExtensionMode.HDR
+            else -> null
+        }
+        val bindSelector = if (extensionMode != null && extensions != null) {
+            extensions.getExtensionEnabledCameraSelector(selector, extensionMode)
+        } else {
+            selector
+        }
+
+        val photoAspect = when (key.mode) {
+            CaptureMode.VIDEO, CaptureMode.TIMELAPSE -> AspectRatio.RATIO_16_9
+            CaptureMode.PORTRAIT, CaptureMode.NIGHT -> AspectRatio.RATIO_4_3
+            else -> key.aspect.streamAspect()
+        }
         val videoQuality = if (key.mode == CaptureMode.VIDEO) {
             resolveVideoQuality(key.videoQuality, capabilities.videoQualities) ?: run {
                 fail(app.getString(R.string.camera_error_no_video))
@@ -491,11 +652,21 @@ class CameraSession(
         for ((index, attempt) in attempts.withIndex()) {
             val kinds = attempt.kinds
             val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect)).build()
-                .also { it.surfaceProvider = target.surfaceProvider }
+                .also {
+                    it.surfaceProvider = target.surfaceProvider
+                    routedProvider = target.surfaceProvider
+                }
             val imageCapture = if (UseCaseKind.IMAGE in kinds) {
                 ImageCapture.Builder()
-                    // Minimal shutter lag keeps a live photo's still close to its stamped moment in the clip.
-                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                    // Minimal shutter lag keeps a live photo's still close to its stamped moment in the clip;
+                    // the maker's processing (portrait, night, HDR) is about quality instead.
+                    .setCaptureMode(
+                        if (extensionMode == null) {
+                            ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                        } else {
+                            ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+                        },
+                    )
                     .setResolutionSelector(resolutionSelector(photoAspect))
                     .build()
             } else {
@@ -518,13 +689,23 @@ class CameraSession(
                     mirror = key.mirrorFrontCamera,
                 )
             }
+            val imageAnalysis = if (UseCaseKind.ANALYSIS in kinds) {
+                ImageAnalysis.Builder()
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setResolutionSelector(analysisResolution(photoAspect))
+                    .build()
+            } else {
+                null
+            }
             val group = UseCaseGroup.Builder().setViewPort(viewPort(key)).addUseCase(preview)
             imageCapture?.let(group::addUseCase)
             videoCapture?.let(group::addUseCase)
+            imageAnalysis?.let(group::addUseCase)
 
             val bound = try {
                 provider.unbindAll()
-                provider.bindToLifecycle(this, selector, group.build())
+                provider.bindToLifecycle(this, bindSelector, group.build())
             } catch (e: IllegalArgumentException) {
                 Log.w(TAG, "Binding $kinds failed", e)
                 lastError = e
@@ -536,11 +717,63 @@ class CameraSession(
             }
             // A live photo that had to drop its video stream is not available on this camera.
             val livePhotoAvailable = !(key.mode == CaptureMode.PHOTO && key.livePhoto && index > 0)
+            this.imageAnalysis = imageAnalysis
             onBound(key, bound, preview, imageCapture, videoCapture, capabilities, lensFacing, livePhotoAvailable)
             return
         }
         Log.e(TAG, "Binding use cases failed", lastError)
-        fail(app.getString(R.string.camera_error_bind, lastError?.message ?: ""))
+        fallBackOrFail(lastError)
+    }
+
+    /**
+     * A maker mode, HDR or slow motion that the probe offered but the camera then refused falls back to a
+     * simpler setup (the settings change rebinds) instead of leaving the user on an error screen.
+     */
+    private suspend fun fallBackOrFail(error: Throwable?) {
+        if (afterBindFailure(settings) != null) {
+            _events.tryEmit(SessionEvent.CaptureFailed(app.getString(R.string.mode_unavailable)))
+            settingsRepository.update { afterBindFailure(it) ?: it }
+            return
+        }
+        fail(app.getString(R.string.camera_error_bind, error?.message ?: ""))
+    }
+
+    /** High-speed recording has its own session shape: one preview and one video stream at a fixed rate. */
+    private suspend fun bindSlowMotion(
+        key: BindingKey,
+        target: PreviewTarget,
+        provider: ProcessCameraProvider,
+        selector: CameraSelector,
+        cameraInfo: CameraInfo,
+        capabilities: CameraCapabilities,
+    ) {
+        val fps = key.slowMotionFps.takeIf { it in capabilities.slowMotionFps } ?: capabilities.slowMotionFps.max()
+        val quality = CapabilityProbe.slowMotionQuality(cameraInfo, fps) ?: run {
+            fallBackOrFail(null)
+            return
+        }
+        val preview = Preview.Builder().build().also {
+            it.surfaceProvider = target.surfaceProvider
+            routedProvider = target.surfaceProvider
+        }
+        val videoCapture = VideoCapture.withOutput(
+            Recorder.Builder().setQualitySelector(QualitySelector.from(quality)).build(),
+        )
+        val session = HighSpeedVideoSessionConfig(videoCapture, preview, android.util.Range(fps, fps), true)
+        val bound = try {
+            provider.unbindAll()
+            provider.bindToLifecycle(this, selector, session)
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "Binding slow motion failed", e)
+            fallBackOrFail(e)
+            return
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "Binding slow motion failed", e)
+            fallBackOrFail(e)
+            return
+        }
+        imageAnalysis = null
+        onBound(key, bound, preview, null, videoCapture, capabilities, cameraInfo.lensFacing, livePhotoAvailable = true)
     }
 
     private fun onBound(
@@ -581,6 +814,22 @@ class CameraSession(
         }
     }
 
+    /** Loaded once; a phone without maker Extensions (or a failure loading them) yields null. */
+    private suspend fun extensions(provider: ProcessCameraProvider): ExtensionsManager? {
+        if (!extensionsLoaded) {
+            extensionsManager = try {
+                ExtensionsManager.getInstance(app, provider)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Camera extensions unavailable", e)
+                null
+            }
+            extensionsLoaded = true
+        }
+        return extensionsManager
+    }
+
     private fun observeCamera(camera: Camera) {
         cameraObservers?.cancel()
         cameraObservers = scope.launch {
@@ -594,6 +843,8 @@ class CameraSession(
                     val error = cameraState.error
                     if (error != null) {
                         _state.update { it.copy(status = SessionStatus.ERROR, errorMessage = describe(error.code)) }
+                        // The Recorder ends a video on its own; a time-lapse keeps what it has.
+                        if (_state.value.recording?.kind == RecordingKind.TIMELAPSE) stopTimelapse()
                     } else if (cameraState.type == CameraState.Type.OPEN) {
                         _state.update { it.copy(status = SessionStatus.READY, errorMessage = null) }
                     }
@@ -610,12 +861,13 @@ class CameraSession(
         }
         val camera = camera ?: return
         if (camera.cameraInfo.hasFlashUnit()) {
-            camera.cameraControl.enableTorch(settings.mode == CaptureMode.VIDEO && settings.torch)
+            camera.cameraControl.enableTorch(settings.mode.isVideo() && settings.torch)
         }
     }
 
     private fun applyTargetRotation() {
         imageCapture?.targetRotation = targetRotation
+        imageAnalysis?.targetRotation = targetRotation
         videoCapture?.targetRotation = targetRotation
     }
 
@@ -663,7 +915,8 @@ class CameraSession(
 
     private fun viewPort(key: BindingKey): ViewPort {
         val (width, height) = when {
-            key.mode == CaptureMode.VIDEO -> 9 to 16
+            key.mode == CaptureMode.VIDEO || key.mode == CaptureMode.TIMELAPSE -> 9 to 16
+            key.mode == CaptureMode.PORTRAIT || key.mode == CaptureMode.NIGHT -> 3 to 4
             key.aspect == PhotoAspect.RATIO_16_9 -> 9 to 16
             key.aspect == PhotoAspect.RATIO_1_1 -> 1 to 1
             else -> 3 to 4
@@ -700,6 +953,7 @@ class CameraSession(
         const val FOCUS_AUTO_CANCEL_SECONDS = 3L
         const val FPS_60 = 60
         const val COUNTDOWN_STEP_MS = 1_000L
+        const val TIMELAPSE_CLOCK_MS = 500L
         const val EVENT_BUFFER = 64
         const val ZOOM_ANIMATION_MS = 300L
         const val ZOOM_FRAME_MS = 16L
@@ -707,6 +961,14 @@ class CameraSession(
         // 1:1 is cropped from the 4:3 stream by the view port.
         fun PhotoAspect.streamAspect(): Int =
             if (this == PhotoAspect.RATIO_16_9) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
+
+        /** Analysis frames near 1080p: enough for a time-lapse, cheap to convert every interval. */
+        fun analysisResolution(aspect: Int): ResolutionSelector = ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy(aspect, AspectRatioStrategy.FALLBACK_RULE_AUTO))
+            .setResolutionStrategy(
+                ResolutionStrategy(android.util.Size(1920, 1080), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER),
+            )
+            .build()
 
         fun resolutionSelector(aspect: Int): ResolutionSelector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy(aspect, AspectRatioStrategy.FALLBACK_RULE_AUTO))

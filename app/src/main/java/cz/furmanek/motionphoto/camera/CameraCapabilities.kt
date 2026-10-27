@@ -20,6 +20,10 @@ data class CameraCapabilities(
     val backLenses: List<LensOption>,
     val hasFrontCamera: Boolean,
     val hasBackCamera: Boolean,
+    /** High-speed rates usable for slow motion, out of 120 and 240. */
+    val slowMotionFps: Set<Int> = emptySet(),
+    /** Maker extensions this camera offers (ExtensionMode.BOKEH, NIGHT, HDR). */
+    val extensionModes: Set<Int> = emptySet(),
 )
 
 private val ZOOM_STEPS = listOf(1f, 2f, 5f, 10f)

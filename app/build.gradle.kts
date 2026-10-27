@@ -19,8 +19,8 @@ android {
         // Scoped storage (MediaStore RELATIVE_PATH / IS_PENDING) needs API 29.
         minSdk = 29
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "0.4.0"
     }
 
     signingConfigs {
@@ -67,6 +67,7 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.camera.extensions)
 
     implementation(libs.adobe.xmpcore)
     implementation(libs.kotlinx.coroutines.android)

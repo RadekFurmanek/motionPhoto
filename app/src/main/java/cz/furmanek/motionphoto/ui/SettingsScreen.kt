@@ -138,6 +138,24 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            val slowMotionRates = capabilities?.slowMotionFps.orEmpty().sorted()
+            if (slowMotionRates.isNotEmpty()) {
+                Section(stringResource(R.string.settings_section_slow_motion))
+                val effectiveRate = settings.slowMotionFps.takeIf { it in slowMotionRates } ?: slowMotionRates.last()
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    slowMotionRates.forEach { rate ->
+                        FilterChip(
+                            selected = effectiveRate == rate,
+                            onClick = { onUpdate { it.copy(slowMotionFps = rate) } },
+                            label = { Text(stringResource(R.string.slow_motion_fps, rate)) },
+                        )
+                    }
+                }
+            }
         }
     }
 }

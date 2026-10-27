@@ -69,12 +69,16 @@ import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cz.furmanek.motionphoto.R
+import cz.furmanek.motionphoto.camera.RecordingKind
 import cz.furmanek.motionphoto.camera.SessionEvent
 import cz.furmanek.motionphoto.camera.SessionStatus
+import cz.furmanek.motionphoto.camera.availableModes
+import cz.furmanek.motionphoto.camera.isVideo
 import cz.furmanek.motionphoto.camera.zoomPresets
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
+import cz.furmanek.motionphoto.timelapse.timelapseOutputDurationMs
 import cz.furmanek.motionphoto.settings.effectiveLivePhoto
 import cz.furmanek.motionphoto.ui.components.ExposureSlider
 import cz.furmanek.motionphoto.ui.components.GridOverlay
@@ -92,7 +96,7 @@ import kotlinx.coroutines.flow.collectLatest
 
 private const val FOCUS_INDICATOR_VISIBLE_MS = 1_200L
 private const val EXPOSURE_SLIDER_VISIBLE_MS = 3_000L
-private val MODES = listOf(CaptureMode.VIDEO, CaptureMode.PHOTO)
+private val DEFAULT_MODES = listOf(CaptureMode.VIDEO, CaptureMode.PHOTO)
 private val MODE_SWIPE_THRESHOLD = 48.dp
 
 @Composable
@@ -110,7 +114,6 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
     val recording = state.recording
     val locked = state.busy || recording != null
     val ready = state.status == SessionStatus.READY
-    val isVideo = settings.mode == CaptureMode.VIDEO
 
     // FIT_CENTER shows exactly the frame that is saved.
     val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FIT_CENTER } }
@@ -201,7 +204,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                     }
                 },
         ) {
-            if (settings.grid) GridOverlay(outputAspect(isVideo, settings.aspect), Modifier.fillMaxSize())
+            if (settings.grid) GridOverlay(outputAspect(settings.mode, settings.aspect), Modifier.fillMaxSize())
             focusPoint?.let { FocusIndicator(position = it, key = focusTapCount) }
         }
 
@@ -228,7 +231,14 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 onUpdate = viewModel::updateSettings,
                 onOpenSettings = { showSettings = true },
             )
-            recording?.let { RecordingIndicator(it.durationNanos, it.paused, Modifier.padding(top = 8.dp)) }
+            recording?.let {
+                RecordingIndicator(
+                    it.durationNanos,
+                    it.paused,
+                    Modifier.padding(top = 8.dp),
+                    outputMillis = if (it.kind == RecordingKind.TIMELAPSE) timelapseOutputDurationMs(it.frames) else null,
+                )
+            }
             SnackbarHost(snackbarHostState)
         }
 
@@ -285,23 +295,24 @@ private fun BottomControls(
     val recording = state.recording
     val locked = state.busy || recording != null
     val ready = state.status == SessionStatus.READY
-    val isVideo = settings.mode == CaptureMode.VIDEO
+    val isVideo = settings.mode.isVideo()
+    val modes = capabilities?.let(::availableModes) ?: DEFAULT_MODES
     val swipeThresholdPx = with(LocalDensity.current) { MODE_SWIPE_THRESHOLD.toPx() }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .pointerInput(locked) {
+            .pointerInput(locked, modes) {
                 if (locked) return@pointerInput
                 var dragged = 0f
                 detectHorizontalDragGestures(
                     onDragStart = { dragged = 0f },
                     onDragEnd = {
                         if (abs(dragged) >= swipeThresholdPx) {
-                            val index = MODES.indexOf(viewModel.settings.value.mode)
+                            val index = modes.indexOf(viewModel.settings.value.mode)
                             // Swiping left moves to the mode on the right, as in other camera apps.
-                            val next = (index + if (dragged < 0) 1 else -1).coerceIn(MODES.indices)
-                            viewModel.setMode(MODES[next])
+                            val next = (index + if (dragged < 0) 1 else -1).coerceIn(modes.indices)
+                            viewModel.setMode(modes[next])
                         }
                     },
                 ) { _, dragAmount -> dragged += dragAmount }
@@ -319,14 +330,17 @@ private fun BottomControls(
             ZoomChips(zoomPresets(capabilities.minZoom, capabilities.maxZoom), state.zoomRatio, onSelect = viewModel::setZoom)
         }
 
-        ModeBar(MODES, settings.mode, enabled = !locked, onSelect = viewModel::setMode)
+        ModeBar(modes, settings.mode, enabled = !locked, onSelect = viewModel::setMode)
 
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (recording != null) {
+            if (recording != null && recording.kind == RecordingKind.TIMELAPSE) {
+                // A time-lapse has nothing to pause: stopping keeps what was taken.
+                Spacer(Modifier.size(56.dp))
+            } else if (recording != null) {
                 RoundButton(
                     onClick = if (recording.paused) viewModel::resumeRecording else viewModel::pauseRecording,
                 ) {
@@ -343,8 +357,11 @@ private fun BottomControls(
             ShutterButton(
                 isVideo = isVideo,
                 isRecording = recording != null,
-                showClipProgress = state.busy && state.countdown == null && !isVideo && settings.effectiveLivePhoto() &&
-                    state.livePhotoAvailable,
+                showClipProgress = state.busy && state.countdown == null && settings.mode == CaptureMode.PHOTO &&
+                    settings.effectiveLivePhoto() && state.livePhotoAvailable,
+                // The maker's portrait, night and HDR processing can take seconds.
+                processing = state.busy && state.countdown == null &&
+                    (settings.mode == CaptureMode.PORTRAIT || settings.mode == CaptureMode.NIGHT || settings.hdr),
                 // During the self-timer the shutter cancels the countdown.
                 enabled = ready && (!state.busy || state.countdown != null),
                 onClick = viewModel::onShutter,
