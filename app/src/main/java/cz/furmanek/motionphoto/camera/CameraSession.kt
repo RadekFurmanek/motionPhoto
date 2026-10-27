@@ -55,6 +55,8 @@ import cz.furmanek.motionphoto.settings.SettingsRepository
 import cz.furmanek.motionphoto.settings.VideoQualitySetting
 import cz.furmanek.motionphoto.settings.effectiveLivePhoto
 import cz.furmanek.motionphoto.settings.shutterSoundRequired
+import cz.furmanek.motionphoto.timelapse.TimelapseOutcome
+import cz.furmanek.motionphoto.timelapse.classifyTimelapse
 import cz.furmanek.motionphoto.location.LocationProvider
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
@@ -199,7 +201,6 @@ class CameraSession(
     init {
         scope.launch(Dispatchers.IO) {
             PhotoCapture.deleteTempFiles(app.cacheDir)
-            TimelapseRecorder.deleteTempFiles(app.cacheDir)
         }
         scope.launch {
             val latest = withContext(Dispatchers.IO) { runCatching { writer.latestOwnCapture() }.getOrNull() }
@@ -429,12 +430,15 @@ class CameraSession(
         // No sound in a time-lapse, so the service only needs the camera type.
         RecordingService.start(app, withAudio = false, timelapse = true)
         playSound(MediaActionSound.START_VIDEO_RECORDING)
-        timelapseRecorder.start(analysis, settings.timelapseIntervalMs) { frames ->
-            updateRecording { it.copy(frames = frames) }
-        }
         val startedAtNs = SystemClock.elapsedRealtimeNanos()
         val startedAtMillis = System.currentTimeMillis()
-        timelapseStartedAtMillis = startedAtMillis
+        timelapseRecorder.start(
+            analysis,
+            settings.timelapseIntervalMs,
+            openOutput = { writer.createPendingVideo(startedAtMillis) },
+            onFrame = { frames -> updateRecording { it.copy(frames = frames) } },
+            onEncoderFailed = { if (_state.value.recording?.kind == RecordingKind.TIMELAPSE) stopTimelapse() },
+        )
         timelapseClock = scope.launch {
             while (true) {
                 updateRecording { it.copy(durationNanos = SystemClock.elapsedRealtimeNanos() - startedAtNs) }
@@ -447,7 +451,6 @@ class CameraSession(
         updateLifecycle()
     }
 
-    private var timelapseStartedAtMillis = 0L
     private var timelapseStopping = false
 
     private fun stopTimelapse() {
@@ -456,19 +459,28 @@ class CameraSession(
         timelapseClock?.cancel()
         scope.launch {
             try {
-                val file = timelapseRecorder.stop()
-                if (file == null) {
-                    reportRecordingProblem(app.getString(R.string.timelapse_empty))
-                } else {
-                    val uri = withContext(Dispatchers.IO) {
-                        try {
-                            writer.saveVideoFile(file, timelapseStartedAtMillis)
-                        } finally {
-                            file.delete()
+                val result = timelapseRecorder.stop()
+                val outcome = classifyTimelapse(result.playable, result.frames, result.encoderFailed)
+                val uri = result.uri
+                if (uri == null || outcome == TimelapseOutcome.EMPTY || outcome == TimelapseOutcome.FAILED) {
+                    // Nothing playable: the pending entry would only leave a broken file behind.
+                    if (uri != null) {
+                        withContext(Dispatchers.IO) {
+                            runCatching { writer.discardVideo(uri) }.onFailure { Log.w(TAG, "Discarding $uri failed", it) }
                         }
                     }
+                    val empty = outcome == TimelapseOutcome.EMPTY
+                    reportRecordingProblem(app.getString(if (empty) R.string.timelapse_empty else R.string.recording_failed))
+                } else {
+                    withContext(Dispatchers.IO) { writer.publishVideo(uri) }
                     _state.update { it.copy(lastCapture = uri) }
-                    _events.tryEmit(SessionEvent.Saved(SavedMedia(uri, MediaKind.VIDEO)))
+                    if (outcome == TimelapseOutcome.SAVED) {
+                        _events.tryEmit(SessionEvent.Saved(SavedMedia(uri, MediaKind.VIDEO)))
+                    } else {
+                        // The encoder broke mid-run; what it wrote before is in the gallery.
+                        _events.tryEmit(SessionEvent.RecordingInterrupted(uri))
+                        if (!uiVisible) RecordingService.notifyResult(app, app.getString(R.string.recording_interrupted))
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e

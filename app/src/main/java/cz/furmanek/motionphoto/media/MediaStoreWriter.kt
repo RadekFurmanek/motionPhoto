@@ -6,6 +6,7 @@ import android.content.ContentValues
 import android.location.Location
 import android.net.Uri
 import android.os.Environment
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.exifinterface.media.ExifInterface
@@ -40,17 +41,36 @@ class MediaStoreWriter(private val resolver: ContentResolver, private val packag
 
     /** Copies a finished video file into DCIM/Camera (used when another app asked for a video without a target). */
     fun saveVideoFile(video: File, capturedAtMillis: Long): Uri {
-        val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, MediaNaming.fileName(MediaKind.VIDEO, capturedAtMillis))
-            put(MediaStore.Video.Media.MIME_TYPE, MediaKind.VIDEO.mimeType)
-            put(MediaStore.Video.Media.RELATIVE_PATH, RELATIVE_PATH)
-            put(MediaStore.Video.Media.DATE_TAKEN, capturedAtMillis)
-            put(MediaStore.Video.Media.IS_PENDING, 1)
-        }
-        val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        return insertPending(collection, values, MediaStore.Video.Media.IS_PENDING) { output ->
+        val values = pendingVideoValues(capturedAtMillis)
+        return insertPending(videoCollection(), values, MediaStore.Video.Media.IS_PENDING) { output ->
             video.inputStream().use { it.copyTo(output) }
         }
+    }
+
+    /** A video entry in DCIM/Camera that stays hidden until [publishVideo]; the caller writes through [descriptor]. */
+    class PendingVideo(val uri: Uri, val descriptor: ParcelFileDescriptor)
+
+    /**
+     * Creates a pending video entry for a writer that cannot stream, such as MediaMuxer: it is opened for reading
+     * and writing because the muxer seeks back to write the index. Finish with [publishVideo] or [discardVideo].
+     */
+    fun createPendingVideo(capturedAtMillis: Long): PendingVideo {
+        val uri = resolver.insert(videoCollection(), pendingVideoValues(capturedAtMillis))
+            ?: throw IOException("MediaStore refused to create an entry in $RELATIVE_PATH")
+        try {
+            val descriptor = resolver.openFileDescriptor(uri, "rw") ?: throw IOException("Cannot open $uri for writing")
+            return PendingVideo(uri, descriptor)
+        } catch (e: Throwable) {
+            deleteAfterFailure(uri, e)
+        }
+    }
+
+    fun publishVideo(uri: Uri) {
+        resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
+    }
+
+    fun discardVideo(uri: Uri) {
+        resolver.delete(uri, null, null)
     }
 
     /** The Recorder writes the video into MediaStore itself and handles the pending state. */
@@ -117,13 +137,27 @@ class MediaStoreWriter(private val resolver: ContentResolver, private val packag
             resolver.update(uri, ContentValues().apply { put(pendingColumn, 0) }, null, null)
             return uri
         } catch (e: Throwable) {
-            try {
-                resolver.delete(uri, null, null)
-            } catch (cleanup: Exception) {
-                e.addSuppressed(cleanup)
-            }
-            throw e
+            deleteAfterFailure(uri, e)
         }
+    }
+
+    private fun deleteAfterFailure(uri: Uri, e: Throwable): Nothing {
+        try {
+            resolver.delete(uri, null, null)
+        } catch (cleanup: Exception) {
+            e.addSuppressed(cleanup)
+        }
+        throw e
+    }
+
+    private fun videoCollection(): Uri = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+
+    private fun pendingVideoValues(capturedAtMillis: Long) = ContentValues().apply {
+        put(MediaStore.Video.Media.DISPLAY_NAME, MediaNaming.fileName(MediaKind.VIDEO, capturedAtMillis))
+        put(MediaStore.Video.Media.MIME_TYPE, MediaKind.VIDEO.mimeType)
+        put(MediaStore.Video.Media.RELATIVE_PATH, RELATIVE_PATH)
+        put(MediaStore.Video.Media.DATE_TAKEN, capturedAtMillis)
+        put(MediaStore.Video.Media.IS_PENDING, 1)
     }
 
     private fun writeExifLocation(jpeg: File, location: Location) {

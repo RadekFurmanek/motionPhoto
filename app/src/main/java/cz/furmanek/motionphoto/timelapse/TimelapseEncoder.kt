@@ -5,15 +5,17 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.util.Log
 import java.io.Closeable
-import java.io.File
+import java.io.FileDescriptor
 
 /**
  * Encodes I420 frames of [width]×[height] (multiples of 16, see [alignedEncoderSize]) into an H.264 MP4
  * at [fps], frame n at n/fps seconds whatever the capture interval was. Not thread-safe: one worker thread.
+ * [output] must be seekable and readable as well as writable; the caller owns and closes it after [finish].
  */
 class TimelapseEncoder(
-    private val output: File,
+    output: FileDescriptor,
     private val width: Int,
     private val height: Int,
     rotationDegrees: Int,
@@ -21,7 +23,12 @@ class TimelapseEncoder(
 ) : Closeable {
 
     private val codec = MediaCodec.createEncoderByType(MIME_TYPE)
-    private val muxer = MediaMuxer(output.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+    private val muxer = try {
+        MediaMuxer(output, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+    } catch (e: Exception) {
+        codec.release()
+        throw e
+    }
     private val bufferInfo = MediaCodec.BufferInfo()
     private var track = -1
     private var muxerStarted = false
@@ -32,7 +39,6 @@ class TimelapseEncoder(
         private set
 
     init {
-        require(width % 16 == 0 && height % 16 == 0) { "Encoder size must be a multiple of 16, got ${width}x$height" }
         val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             setInteger(MediaFormat.KEY_BIT_RATE, (width * height * BITS_PER_PIXEL).coerceAtMost(MAX_BIT_RATE))
@@ -40,18 +46,18 @@ class TimelapseEncoder(
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         }
         try {
+            require(width % 16 == 0 && height % 16 == 0) { "Encoder size must be a multiple of 16, got ${width}x$height" }
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             codec.start()
             muxer.setOrientationHint(rotationDegrees)
-        } catch (e: RuntimeException) {
+        } catch (e: Exception) {
             codec.release()
             muxer.release()
-            output.delete()
             throw e
         }
     }
 
-    /** Encodes one frame laid out as [rgbaToI420] produces it. Blocks until the codec takes it. */
+    /** Encodes one frame laid out as [rgbaToI420] produces it. Blocks until the codec takes it; throws when it stalls. */
     fun addFrame(i420: ByteArray) {
         check(!finished) { "Encoder already finished" }
         val index = dequeueInput()
@@ -62,12 +68,15 @@ class TimelapseEncoder(
         drain(endOfStream = false)
     }
 
-    /** Completes the file. Returns false, and deletes the file, when no frame was written. */
+    /**
+     * Completes the file with what was written. Never throws. Returns true only when the file holds at least
+     * one frame and the muxer wrote its index; otherwise the output would not play and should be discarded.
+     */
     fun finish(): Boolean {
         if (finished) return result
         finished = true
-        try {
-            if (frameCount > 0) {
+        if (frameCount > 0) {
+            try {
                 codec.queueInputBuffer(
                     dequeueInput(),
                     0,
@@ -76,15 +85,19 @@ class TimelapseEncoder(
                     MediaCodec.BUFFER_FLAG_END_OF_STREAM,
                 )
                 drain(endOfStream = true)
+            } catch (e: Exception) {
+                // The frames muxed so far are still worth keeping.
+                Log.w(TAG, "Ending the time-lapse stream failed", e)
             }
-        } finally {
-            runCatching { codec.stop() }
-            codec.release()
-            if (muxerStarted) runCatching { muxer.stop() }
-            muxer.release()
         }
-        result = frameCount > 0 && muxerStarted
-        if (!result) output.delete()
+        runCatching { codec.stop() }
+        runCatching { codec.release() }
+        // A muxer that failed to stop wrote no index, so the file would not play.
+        val muxerStopped = muxerStarted && runCatching { muxer.stop() }
+            .onFailure { Log.e(TAG, "Stopping the muxer failed", it) }
+            .isSuccess
+        runCatching { muxer.release() }
+        result = frameCount > 0 && muxerStopped
         return result
     }
 
@@ -93,19 +106,26 @@ class TimelapseEncoder(
     }
 
     private fun dequeueInput(): Int {
+        val deadline = System.nanoTime() + STALL_TIMEOUT_NS
         while (true) {
             val index = codec.dequeueInputBuffer(TIMEOUT_US)
             if (index >= 0) return index
+            check(System.nanoTime() < deadline) { "Codec took no input for $STALL_TIMEOUT_NS ns" }
             // The codec is full: emptying its output frees input buffers.
             drain(endOfStream = false)
         }
     }
 
     private fun drain(endOfStream: Boolean) {
+        val deadline = System.nanoTime() + STALL_TIMEOUT_NS
         while (true) {
             val index = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
             when {
-                index == MediaCodec.INFO_TRY_AGAIN_LATER -> if (!endOfStream) return
+                index == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                    if (!endOfStream) return
+                    // A codec in an error state may never signal the end; the muxer then stops with what it has.
+                    check(System.nanoTime() < deadline) { "Codec gave no end of stream for $STALL_TIMEOUT_NS ns" }
+                }
                 index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                     track = muxer.addTrack(codec.outputFormat)
                     muxer.start()
@@ -153,6 +173,8 @@ class TimelapseEncoder(
     }
 
     private companion object {
+        const val TAG = "TimelapseEncoder"
+        const val STALL_TIMEOUT_NS = 2_000_000_000L
         const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
         const val TIMEOUT_US = 10_000L
         const val BITS_PER_PIXEL = 4
