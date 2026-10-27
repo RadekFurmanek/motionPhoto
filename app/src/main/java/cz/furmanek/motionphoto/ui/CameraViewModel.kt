@@ -7,6 +7,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import cz.furmanek.motionphoto.MotionPhotoApp
+import cz.furmanek.motionphoto.camera.ProbeOutcome
+import cz.furmanek.motionphoto.camera.ProbeResult
 import cz.furmanek.motionphoto.camera.SessionEvent
 import cz.furmanek.motionphoto.camera.SessionState
 import cz.furmanek.motionphoto.panorama.Attitude
@@ -15,8 +17,10 @@ import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
 import cz.furmanek.motionphoto.settings.LENS_FACING_FRONT
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -82,6 +86,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun selectBackCamera(cameraId: String?) = session.selectBackCamera(cameraId)
 
     fun setMacro(on: Boolean) = session.setMacro(on)
+
+    private val _hiddenProbe = MutableStateFlow<Map<String, ProbeResult>?>(null)
+
+    /** Results of trying the hidden cameras, by id; null until tried. */
+    val hiddenProbe: StateFlow<Map<String, ProbeResult>?> = _hiddenProbe.asStateFlow()
+
+    fun probeHiddenCameras(ids: List<String>) {
+        viewModelScope.launch {
+            // While a capture runs the camera stays put; that reads as busy.
+            _hiddenProbe.value = session.probeHiddenCameras(ids)
+                ?: ids.associateWith { ProbeResult(ProbeOutcome.BUSY) }
+        }
+    }
 
     fun focusAt(x: Float, y: Float) = session.focusAt(x, y)
 

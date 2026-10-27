@@ -338,6 +338,8 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 capabilities = capabilities,
                 shutterSoundMandatory = viewModel.shutterSoundMandatory,
                 onUpdate = viewModel::updateSettings,
+                hiddenProbe = viewModel.hiddenProbe.collectAsStateWithLifecycle().value,
+                onProbeHidden = viewModel::probeHiddenCameras,
                 onBack = { showSettings = false },
             )
         }

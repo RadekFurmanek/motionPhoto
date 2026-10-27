@@ -108,4 +108,11 @@
     <string name="camera_focus_fixed">pevné ostření</string>
     <string name="macro_uses_lens">Makro: fotoaparát %1$s</string>
     <string name="macro_uses_zoom">Makro: hlavní fotoaparát se zoomem %1$s</string>
+    <string name="probe_hidden">Vyzkoušet skryté fotoaparáty</string>
+    <string name="probe_running">Zkouším…</string>
+    <string name="probe_works">funguje ✓</string>
+    <string name="probe_blocked">telefon nepovolí</string>
+    <string name="probe_busy">obsazený</string>
+    <string name="probe_no_frame">otevře se, ale bez obrazu</string>
+    <string name="probe_failed">chyba: %1$s</string>
 </resources>

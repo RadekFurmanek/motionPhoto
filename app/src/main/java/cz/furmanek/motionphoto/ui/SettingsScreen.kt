@@ -22,10 +22,15 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -35,6 +40,8 @@ import cz.furmanek.motionphoto.R
 import cz.furmanek.motionphoto.camera.CameraCapabilities
 import cz.furmanek.motionphoto.camera.LensInfo
 import cz.furmanek.motionphoto.camera.MacroSetup
+import cz.furmanek.motionphoto.camera.ProbeOutcome
+import cz.furmanek.motionphoto.camera.ProbeResult
 import cz.furmanek.motionphoto.camera.minFocusCm
 import cz.furmanek.motionphoto.camera.resolveVideoQuality
 import cz.furmanek.motionphoto.camera.usesCustomPortrait
@@ -50,6 +57,8 @@ fun SettingsScreen(
     capabilities: CameraCapabilities?,
     shutterSoundMandatory: Boolean,
     onUpdate: ((CameraSettings) -> CameraSettings) -> Unit,
+    hiddenProbe: Map<String, ProbeResult>?,
+    onProbeHidden: (List<String>) -> Unit,
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
@@ -204,7 +213,25 @@ fun SettingsScreen(
                     is MacroSetup.Zoomed -> InfoRow(stringResource(R.string.macro_uses_zoom, formatZoom(macro.zoomRatio)))
                     null -> Unit
                 }
-                capabilities.lenses.forEach { lens -> InfoRow(lensDescription(lens)) }
+                capabilities.lenses.forEach { lens ->
+                    val probe = hiddenProbe?.get(lens.cameraId)?.takeIf { lens.hidden }
+                    InfoRow(lensDescription(lens) + (probe?.let { " · " + probeDescription(it) } ?: ""))
+                }
+                val hiddenIds = capabilities.lenses.filter { it.hidden }.map { it.cameraId }
+                if (hiddenIds.isNotEmpty()) {
+                    // Cleared when the results arrive (or the session refuses because a capture runs).
+                    var probing by remember(hiddenProbe) { mutableStateOf(false) }
+                    OutlinedButton(
+                        onClick = {
+                            probing = true
+                            onProbeHidden(hiddenIds)
+                        },
+                        enabled = !probing,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    ) {
+                        Text(stringResource(if (probing) R.string.probe_running else R.string.probe_hidden))
+                    }
+                }
             }
         }
     }
@@ -219,6 +246,15 @@ private fun lensDescription(lens: LensInfo): String {
     val focus = minFocusCm(lens.minFocusDiopters)?.let { stringResource(R.string.camera_focus_cm, it) }
         ?: stringResource(R.string.camera_focus_fixed)
     return "$id · $facing · ${"%.1f".format(lens.focalMm)} mm · $focus"
+}
+
+@Composable
+private fun probeDescription(result: ProbeResult): String = when (result.outcome) {
+    ProbeOutcome.WORKS -> stringResource(R.string.probe_works)
+    ProbeOutcome.BLOCKED -> stringResource(R.string.probe_blocked)
+    ProbeOutcome.BUSY -> stringResource(R.string.probe_busy)
+    ProbeOutcome.NO_FRAME -> stringResource(R.string.probe_no_frame)
+    ProbeOutcome.FAILED -> stringResource(R.string.probe_failed, result.detail)
 }
 
 @Composable

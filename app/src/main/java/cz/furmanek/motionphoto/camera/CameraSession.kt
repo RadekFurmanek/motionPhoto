@@ -395,6 +395,26 @@ class CameraSession(
         requestBind()
     }
 
+    /**
+     * Tries each of [ids] (cameras the phone hides from its list) directly: lets go of the bound camera first so
+     * the phone does not report it busy, and binds again afterwards. Null when a capture or recording runs.
+     */
+    suspend fun probeHiddenCameras(ids: List<String>): Map<String, ProbeResult>? {
+        if (isLocked()) return null
+        bindJob?.cancel()
+        stopPortraitPreview()
+        stopPreRoll()
+        provider?.unbindAll()
+        camera = null
+        boundKey = null
+        _state.update { it.copy(status = SessionStatus.OPENING) }
+        return try {
+            ids.associateWith { id -> probeCamera(app, id).also { Log.i(TAG, "Hidden camera $id: $it") } }
+        } finally {
+            requestBind()
+        }
+    }
+
     /** Turns Macro on or off; it takes effect in the back camera's Photo mode. */
     fun setMacro(on: Boolean) {
         if (isLocked()) return
