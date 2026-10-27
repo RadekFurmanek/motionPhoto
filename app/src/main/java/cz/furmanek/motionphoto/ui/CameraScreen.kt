@@ -73,6 +73,7 @@ import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cz.furmanek.motionphoto.R
+import cz.furmanek.motionphoto.camera.PhotoCapture
 import cz.furmanek.motionphoto.camera.RecordingKind
 import cz.furmanek.motionphoto.camera.SessionEvent
 import cz.furmanek.motionphoto.camera.SessionStatus
@@ -80,6 +81,7 @@ import cz.furmanek.motionphoto.camera.availableModes
 import cz.furmanek.motionphoto.camera.isVideo
 import cz.furmanek.motionphoto.camera.usesCustomPortrait
 import cz.furmanek.motionphoto.camera.zoomPresets
+import cz.furmanek.motionphoto.livephoto.PreRollRecorder
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
@@ -416,6 +418,8 @@ private fun BottomControls(
                 isRecording = recording != null || panorama?.capturing == true,
                 showClipProgress = state.busy && state.countdown == null && settings.mode == CaptureMode.PHOTO &&
                     settings.effectiveLivePhoto() && state.livePhotoAvailable,
+                // With the pre-roll most of the clip is already recorded at the press.
+                clipDurationMs = if (state.livePhotoPreRoll) PreRollRecorder.POST_ROLL_MS else PhotoCapture.CLIP_DURATION_MS,
                 // Portrait (the maker's or ours), night and HDR processing can take seconds.
                 processing = state.busy && state.countdown == null &&
                     (settings.mode == CaptureMode.PORTRAIT || settings.mode == CaptureMode.NIGHT || settings.hdr),

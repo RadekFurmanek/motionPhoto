@@ -13,7 +13,11 @@ class BindingPlanTest {
     @Test
     fun `live photo falls back to a plain photo binding`() {
         assertEquals(
-            listOf(BindingAttempt(setOf(PREVIEW, IMAGE, VIDEO)), BindingAttempt(setOf(PREVIEW, IMAGE))),
+            listOf(
+                BindingAttempt(setOf(PREVIEW, IMAGE, ANALYSIS), preRoll = true),
+                BindingAttempt(setOf(PREVIEW, IMAGE, VIDEO)),
+                BindingAttempt(setOf(PREVIEW, IMAGE)),
+            ),
             bindingAttempts(CaptureMode.PHOTO, livePhoto = true, videoExtras = true),
         )
     }

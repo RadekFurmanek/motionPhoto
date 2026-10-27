@@ -4,8 +4,11 @@ import cz.furmanek.motionphoto.settings.CaptureMode
 
 enum class UseCaseKind { PREVIEW, IMAGE, VIDEO, ANALYSIS }
 
-/** One binding to try; [videoExtras] allows 60 fps and stabilization on the video stream. */
-data class BindingAttempt(val kinds: Set<UseCaseKind>, val videoExtras: Boolean = false)
+/**
+ * One binding to try; [videoExtras] allows 60 fps and stabilization on the video stream. [preRoll] means the
+ * analysis stream feeds the live photo's continuous encoder, so its clip can start before the press.
+ */
+data class BindingAttempt(val kinds: Set<UseCaseKind>, val videoExtras: Boolean = false, val preRoll: Boolean = false)
 
 /**
  * Bindings to try, best first. Some cameras cannot stream preview, still and video together, or cannot add
@@ -35,8 +38,9 @@ fun bindingAttempts(
             listOf(BindingAttempt(photo))
         }
         CaptureMode.NIGHT -> listOf(BindingAttempt(photo))
+        // Live photo: pre-roll first, then the clip recorded after the press, then a plain still.
         CaptureMode.PHOTO -> if (livePhoto) {
-            listOf(BindingAttempt(photo + UseCaseKind.VIDEO), BindingAttempt(photo))
+            listOf(BindingAttempt(photo + UseCaseKind.ANALYSIS, preRoll = true), BindingAttempt(photo + UseCaseKind.VIDEO), BindingAttempt(photo))
         } else {
             listOf(BindingAttempt(photo))
         }
