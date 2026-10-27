@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -44,6 +45,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -217,6 +219,22 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
         if (state.direct != null) {
             DirectPreview(viewModel::attachDirectSurface, viewModel::setDirectBounds, Modifier.fillMaxSize())
+        }
+        if (settings.mode == CaptureMode.NIGHT) {
+            // A moving phone gets shorter night frames.
+            val steady by rememberPhoneSteady()
+            LaunchedEffect(steady) { viewModel.setPhoneSteady(steady) }
+        }
+        if (state.nightBurstMs != null) {
+            Text(
+                stringResource(R.string.night_hold_still),
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+            )
         }
 
         if (customPortrait) PortraitOverlay(viewModel.portraitFrame, Modifier.fillMaxSize())
@@ -445,10 +463,11 @@ private fun BottomControls(
             ShutterButton(
                 isVideo = isVideo,
                 isRecording = recording != null || panorama?.capturing == true,
-                showClipProgress = state.busy && state.countdown == null && settings.mode == CaptureMode.PHOTO &&
-                    settings.effectiveLivePhoto() && state.livePhotoAvailable,
-                // With the pre-roll most of the clip is already recorded at the press.
-                clipDurationMs = if (state.livePhotoPreRoll) PreRollRecorder.POST_ROLL_MS else PhotoCapture.CLIP_DURATION_MS,
+                showClipProgress = state.nightBurstMs != null || state.busy && state.countdown == null &&
+                    settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && state.livePhotoAvailable,
+                // With the pre-roll most of the clip is already recorded at the press; a night burst fills it in its time.
+                clipDurationMs = state.nightBurstMs
+                    ?: if (state.livePhotoPreRoll) PreRollRecorder.POST_ROLL_MS else PhotoCapture.CLIP_DURATION_MS,
                 // Portrait (the maker's or ours), night and HDR processing can take seconds.
                 processing = state.busy && state.countdown == null &&
                     (settings.mode == CaptureMode.PORTRAIT || settings.mode == CaptureMode.NIGHT || settings.hdr),

@@ -47,8 +47,8 @@ class ModesTest {
     private val panoramaReady = caps(hasRotationVector = true, focalMm = 4.38f)
 
     @Test
-    fun `plain camera offers timelapse, video and photo`() {
-        assertEquals(listOf(TIMELAPSE, VIDEO, PHOTO), availableModes(caps(), LENS_FACING_BACK))
+    fun `plain camera offers timelapse, video, photo and the app's own night`() {
+        assertEquals(listOf(TIMELAPSE, VIDEO, PHOTO, NIGHT), availableModes(caps(), LENS_FACING_BACK))
     }
 
     @Test
@@ -61,7 +61,7 @@ class ModesTest {
 
     @Test
     fun `hdr alone adds no mode`() {
-        assertEquals(listOf(TIMELAPSE, VIDEO, PHOTO), availableModes(caps(extensionModes = setOf(ExtensionMode.HDR)), LENS_FACING_BACK))
+        assertEquals(listOf(TIMELAPSE, VIDEO, PHOTO, NIGHT), availableModes(caps(extensionModes = setOf(ExtensionMode.HDR)), LENS_FACING_BACK))
     }
 
     @Test
@@ -86,7 +86,17 @@ class ModesTest {
 
     @Test
     fun `panorama comes last on a back camera with a rotation vector sensor`() {
-        assertEquals(listOf(TIMELAPSE, VIDEO, PHOTO, PANORAMA), availableModes(panoramaReady, LENS_FACING_BACK))
+        assertEquals(listOf(TIMELAPSE, VIDEO, PHOTO, NIGHT, PANORAMA), availableModes(panoramaReady, LENS_FACING_BACK))
+    }
+
+    @Test
+    fun `night is the app's own unless the maker's is chosen or the own one failed`() {
+        val makerNight = caps(extensionModes = setOf(ExtensionMode.NIGHT))
+        assertEquals(false, usesMakerNight(CameraSettings(mode = NIGHT), makerNight, customBroken = false))
+        assertEquals(true, usesMakerNight(CameraSettings(mode = NIGHT, nightMaker = true), makerNight, customBroken = false))
+        assertEquals(true, usesMakerNight(CameraSettings(mode = NIGHT), makerNight, customBroken = true))
+        // Without the maker's night there is nothing to switch to.
+        assertEquals(false, usesMakerNight(CameraSettings(mode = NIGHT, nightMaker = true), caps(), customBroken = true))
     }
 
     @Test

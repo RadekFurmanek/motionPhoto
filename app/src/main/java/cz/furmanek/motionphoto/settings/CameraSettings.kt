@@ -43,6 +43,8 @@ data class CameraSettings(
     val portraitResolution: PortraitResolution = PortraitResolution.FULL,
     /** Background blur of a custom portrait, a fraction of the photo's longer side. */
     val portraitBlur: Float = PORTRAIT_BLUR_DEFAULT,
+    /** Night uses the maker's processing (where the phone has it) instead of the app's own burst. */
+    val nightMaker: Boolean = false,
 )
 
 /**

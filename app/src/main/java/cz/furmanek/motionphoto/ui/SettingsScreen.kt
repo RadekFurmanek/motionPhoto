@@ -4,6 +4,7 @@ import android.Manifest
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.extensions.ExtensionMode
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -42,6 +43,7 @@ import cz.furmanek.motionphoto.camera.ProbeStage
 import cz.furmanek.motionphoto.camera.minFocusCm
 import cz.furmanek.motionphoto.camera.resolveVideoQuality
 import cz.furmanek.motionphoto.camera.usesCustomPortrait
+import cz.furmanek.motionphoto.night.NightSensor
 import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.PortraitResolution
@@ -145,6 +147,16 @@ fun SettingsScreen(
                 }
             }
 
+            if (capabilities != null && ExtensionMode.NIGHT in capabilities.extensionModes) {
+                SwitchRow(
+                    title = stringResource(R.string.settings_night_maker),
+                    summary = stringResource(R.string.settings_night_maker_summary),
+                    checked = settings.nightMaker,
+                ) { checked ->
+                    onUpdate { it.copy(nightMaker = checked) }
+                }
+            }
+
             val qualities = capabilities?.videoQualities.orEmpty()
             if (qualities.isNotEmpty()) {
                 Section(stringResource(R.string.settings_section_video))
@@ -213,6 +225,7 @@ fun SettingsScreen(
                     is MacroSetup.Zoomed -> InfoRow(stringResource(R.string.macro_uses_zoom, formatZoom(macro.zoomRatio)))
                     null -> Unit
                 }
+                capabilities.nightSensor?.let { InfoRow(nightDescription(it)) }
                 capabilities.lenses.forEach { lens ->
                     val probe = hiddenProbe?.get(lens.cameraId)?.let { probeDescription(it) }
                         ?: probeStages[lens.cameraId]?.let { stageDescription(it) }
@@ -230,6 +243,18 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+}
+
+/** What the app's own night can set on the main camera: the longest exposure and highest ISO. */
+@Composable
+private fun nightDescription(sensor: NightSensor): String {
+    val exposure = sensor.exposureNs
+    val iso = sensor.iso
+    return if (sensor.manual && exposure != null && iso != null) {
+        stringResource(R.string.camera_night_manual, "%.2f".format(exposure.last / 1e9), iso.last)
+    } else {
+        stringResource(R.string.camera_night_auto)
     }
 }
 

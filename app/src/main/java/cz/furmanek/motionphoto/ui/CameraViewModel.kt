@@ -125,6 +125,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setZoom(ratio: Float) = session.selectZoomPreset(ratio)
 
+    fun setPhoneSteady(steady: Boolean) = session.setPhoneSteady(steady)
+
     fun attachDirectSurface(texture: SurfaceTexture?) = session.attachDirectSurface(texture)
 
     fun setDirectBounds(left: Float, top: Float, width: Float, height: Float) = session.setDirectBounds(left, top, width, height)

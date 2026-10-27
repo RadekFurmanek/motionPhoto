@@ -53,6 +53,11 @@ import cz.furmanek.motionphoto.location.LocationProvider
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.media.MediaStoreWriter
 import cz.furmanek.motionphoto.media.SavedMedia
+import cz.furmanek.motionphoto.night.NightStacker
+import cz.furmanek.motionphoto.night.planNight
+import cz.furmanek.motionphoto.night.readNightSensor
+import cz.furmanek.motionphoto.night.warmUpNight
+import cz.furmanek.motionphoto.night.writeNightJpeg
 import cz.furmanek.motionphoto.panorama.Attitude
 import cz.furmanek.motionphoto.panorama.PanoramaCapture
 import cz.furmanek.motionphoto.panorama.PanoramaSensor
@@ -157,6 +162,8 @@ data class SessionState(
     val macro: Boolean = false,
     /** A hidden camera, opened through Camera2, shows instead of the CameraX preview. */
     val direct: DirectKind? = null,
+    /** A night burst is being shot for this long: the phone must be held still. */
+    val nightBurstMs: Long? = null,
 ) {
     /** A capture, recording or panorama runs: mode, camera and capture settings must not change. */
     val controlsLocked: Boolean get() = busy || recording != null || panorama != null
@@ -299,6 +306,12 @@ class CameraSession(
 
     /** A hidden camera failed to open or work; until the app restarts only CameraX lenses are offered. */
     private var hiddenBroken = false
+
+    /** The app's own night failed; until the app restarts Night uses the maker's processing, or a plain photo. */
+    private var nightBroken = false
+
+    /** From the gyroscope while Night shows: a moving phone gets shorter night frames. */
+    private var phoneSteady = true
 
     /** The hidden camera in use, the id it was opened for and the surface it draws into. */
     private var directCamera: DirectCamera? = null
@@ -496,6 +509,13 @@ class CameraSession(
      */
     fun selectZoomPreset(ratio: Float) {
         if (isLocked()) return
+        if (_state.value.direct == DirectKind.NIGHT) {
+            directCamera?.let { night ->
+                night.setZoom(ratio)
+                _state.update { it.copy(zoomRatio = night.zoomRatio) }
+            }
+            return
+        }
         val wideZoom = ultraWideZoom
         val wide = wideZoom != null && ratio == wideZoom && _state.value.capabilities?.ultraWideZoom == wideZoom
         if (macroOn) {
@@ -528,11 +548,22 @@ class CameraSession(
         directBounds = floatArrayOf(left, top, width, height)
     }
 
-    /** The hidden camera wanted now, if any: only in the back camera's Photo mode, on screen. */
+    /**
+     * The camera opened through Camera2 wanted now, if any, on screen: the app's own night on the camera CameraX
+     * last bound for this side (so only once that bind told what the camera can do), or a hidden lens in the back
+     * camera's Photo mode.
+     */
     private fun wantedDirect(): Pair<DirectKind, String>? {
-        if (!uiVisible || hiddenBroken || settings.mode != CaptureMode.PHOTO || settings.lensFacing != LENS_FACING_BACK) {
-            return null
+        if (!uiVisible) return null
+        if (settings.mode == CaptureMode.NIGHT) {
+            val state = _state.value
+            val capabilities = state.capabilities ?: return null
+            if (nightBroken || usesMakerNight(settings, capabilities, nightBroken) || state.lensFacing != settings.lensFacing) {
+                return null
+            }
+            return state.activeCameraId?.let { DirectKind.NIGHT to it }
         }
+        if (hiddenBroken || settings.mode != CaptureMode.PHOTO || settings.lensFacing != LENS_FACING_BACK) return null
         val setup = macroSetup
         if (macroOn && setup is MacroSetup.Hidden) return DirectKind.MACRO to setup.cameraId
         val wide = ultraWide
@@ -553,7 +584,10 @@ class CameraSession(
             _state.update { it.copy(direct = kind, zoomRatio = directZoomRatio(kind, 1f)) }
         }
         val id = wanted?.second
-        if (id == directCameraId && directTexture === directTextureUsed) return id != null
+        val night = kind == DirectKind.NIGHT
+        // The same camera opened for the other use (still or night streams) must reopen.
+        val sameUse = (directCamera?.night ?: night) == night
+        if (id == directCameraId && directTexture === directTextureUsed && sameUse) return id != null
         closeDirect()
         directCameraId = id
         directTextureUsed = directTexture
@@ -571,18 +605,19 @@ class CameraSession(
             if (closingCamera === closing) closingCamera = null
             val camera = try {
                 try {
-                    openDirect(id, texture)
+                    openDirect(id, texture, night)
                 } catch (e: DirectCameraException) {
                     if (!e.busy) throw e
                     Log.w(TAG, "Hidden camera $id busy; trying again", e)
                     delay(DIRECT_RETRY_DELAY_MS)
-                    openDirect(id, texture)
+                    openDirect(id, texture, night)
                 }
             } catch (e: DirectCameraException) {
                 directFailed(e)
                 return@launch
             }
             _state.update { it.copy(status = SessionStatus.READY, errorMessage = null, exposureIndex = 0) }
+            if (night) launch(Dispatchers.Default) { warmUpNight() }
             camera.failed.first { it }
             directFailed(DirectCameraException("camera $id lost"))
         }
@@ -590,9 +625,9 @@ class CameraSession(
     }
 
     /** Opens the hidden camera [id] into [texture]; the camera is kept in [directCamera] so a close reaches it. */
-    private suspend fun openDirect(id: String, texture: SurfaceTexture): DirectCamera {
+    private suspend fun openDirect(id: String, texture: SurfaceTexture, night: Boolean): DirectCamera {
         directCamera?.close()
-        val camera = DirectCamera(app, id)
+        val camera = DirectCamera(app, id, night)
         directCamera = camera
         try {
             texture.setDefaultBufferSize(camera.previewSize.width, camera.previewSize.height)
@@ -608,7 +643,7 @@ class CameraSession(
     /** The chip's zoom while the hidden camera shows at [zoom] of its own. */
     private fun directZoomRatio(kind: DirectKind?, zoom: Float): Float = when (kind) {
         DirectKind.ULTRA_WIDE -> (ultraWideZoom ?: 1f) * zoom
-        DirectKind.MACRO -> zoom
+        DirectKind.MACRO, DirectKind.NIGHT -> zoom
         null -> _state.value.zoomRatio
     }
 
@@ -640,6 +675,15 @@ class CameraSession(
     }
 
     private fun directFailed(error: Exception) {
+        if (_state.value.direct == DirectKind.NIGHT) {
+            Log.e(TAG, "The app's own night failed; the maker's or a plain photo instead", error)
+            nightBroken = true
+            closeDirect()
+            _state.update { it.copy(direct = null) }
+            _events.tryEmit(SessionEvent.CaptureFailed(app.getString(R.string.night_failed, error.message.orEmpty())))
+            requestBind()
+            return
+        }
         Log.e(TAG, "The hidden camera failed; back to the listed ones", error)
         hiddenBroken = true
         ultraWideOn = false
@@ -649,6 +693,73 @@ class CameraSession(
         }
         _events.tryEmit(SessionEvent.CaptureFailed(app.getString(R.string.hidden_camera_failed, error.message.orEmpty())))
         requestBind()
+    }
+
+    /** The phone held still or not, from the UI's gyroscope; read when a night burst is planned. */
+    fun setPhoneSteady(steady: Boolean) {
+        phoneSteady = steady
+    }
+
+    /**
+     * The app's own night: self-timer, then a burst planned from the preview's exposure, merged frame by frame as
+     * it arrives, brightened and saved as a photo. A failure falls back for the rest of the session.
+     */
+    private fun takeNightPhoto(camera: DirectCamera) {
+        _state.update { it.copy(busy = true) }
+        photoJob = scope.launch {
+            val file = withContext(Dispatchers.IO) { File.createTempFile(TEMP_DIRECT_PREFIX, ".jpg", app.cacheDir) }
+            var failure: Exception? = null
+            try {
+                for (remaining in settings.timer.seconds downTo 1) {
+                    _state.update { it.copy(countdown = remaining) }
+                    delay(COUNTDOWN_STEP_MS)
+                }
+                _state.update { it.copy(countdown = null) }
+                val capturedAt = System.currentTimeMillis()
+                val location = async {
+                    if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
+                }
+                val plan = planNight(
+                    camera.lastExposureNs ?: NIGHT_FALLBACK_EXPOSURE_NS,
+                    camera.lastIso ?: NIGHT_FALLBACK_ISO,
+                    camera.nightSensor,
+                    phoneSteady,
+                )
+                Log.i(TAG, "Night: $plan, steady $phoneSteady, preview ${camera.lastExposureNs} ns ISO ${camera.lastIso}")
+                val orientation = jpegOrientation(camera.sensorOrientation, targetRotation)
+                _state.update { it.copy(nightBurstMs = plan.durationMs) }
+                playSound(MediaActionSound.SHUTTER_CLICK)
+                withContext(Dispatchers.Default) {
+                    // The merge's sums are the biggest arrays: they go out of scope before the bitmap is made.
+                    val merged = run {
+                        val stacker = NightStacker(camera.nightFrameSize.width, camera.nightFrameSize.height)
+                        camera.captureNight(plan) { frame ->
+                            val start = SystemClock.elapsedRealtime()
+                            val kept = stacker.add(frame)
+                            Log.i(TAG, "Night: frame ${if (kept) "merged" else "dropped"} in ${SystemClock.elapsedRealtime() - start} ms")
+                        }
+                        _state.update { it.copy(nightBurstMs = null) }
+                        Log.i(TAG, "Night: merged ${stacker.frames} of ${plan.frames} frames")
+                        stacker.result()
+                    }
+                    writeNightJpeg(merged, plan.digitalGain, orientation, file)
+                }
+                val uri = withContext(Dispatchers.IO) { writer.savePhoto(file, capturedAt, location.await()) }
+                val media = SavedMedia(uri, MediaKind.PHOTO)
+                _state.update { it.copy(lastCapture = media.uri) }
+                _events.tryEmit(SessionEvent.Saved(media, null))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failure = e
+            } catch (e: OutOfMemoryError) {
+                failure = DirectCameraException("out of memory", e)
+            } finally {
+                withContext(NonCancellable + Dispatchers.IO) { file.delete() }
+                _state.update { it.copy(busy = false, countdown = null, nightBurstMs = null) }
+            }
+            failure?.let { directFailed(it) } ?: requestBind()
+        }
     }
 
     /** A still from the hidden camera: self-timer, sound, JPEG turned for the phone's hold, saved as a photo. */
@@ -813,7 +924,7 @@ class CameraSession(
         val current = _state.value
         if (current.status != SessionStatus.READY || current.busy || current.recording != null) return
         directCamera?.let {
-            takeDirectPhoto(it)
+            if (it.night) takeNightPhoto(it) else takeDirectPhoto(it)
             return
         }
         val imageCapture = imageCapture ?: return
@@ -1271,6 +1382,7 @@ class CameraSession(
             lenses = lenses,
             macro = macroSetup.takeIf { cameraInfo.lensFacing == CameraSelector.LENS_FACING_BACK },
             ultraWideZoom = ultraWideZoom.takeIf { cameraInfo.lensFacing == CameraSelector.LENS_FACING_BACK && !hiddenBroken },
+            nightSensor = readNightSensor(app, cameraId(cameraInfo)),
         )
         val lensFacing = cameraInfo.lensFacing
 
@@ -1290,7 +1402,8 @@ class CameraSession(
         if (customPortrait) startPortraitModelDownload()
         val extensionMode = when {
             key.mode == CaptureMode.PORTRAIT && !customPortrait -> ExtensionMode.BOKEH
-            key.mode == CaptureMode.NIGHT -> ExtensionMode.NIGHT
+            // The app's own night binds a plain camera first, to learn what it can do, then opens it itself.
+            key.mode == CaptureMode.NIGHT && usesMakerNight(settings, capabilities, nightBroken) -> ExtensionMode.NIGHT
             key.mode == CaptureMode.PHOTO && key.hdr && key.macro == null -> ExtensionMode.HDR
             else -> null
         }
@@ -1522,6 +1635,8 @@ class CameraSession(
         updatePortraitPreview()
         updatePreRoll()
         updatePanoramaLevel()
+        // Night now knows its camera: hand it over to the app's own night.
+        if (wantedDirect() != null) requestBind()
     }
 
     /** Runs the panorama level's sensor while Panorama mode is bound and the app is on screen; stops it otherwise. */
@@ -1729,8 +1844,10 @@ class CameraSession(
             false
         }
 
+    private fun cameraId(camera: Camera): String = cameraId(camera.cameraInfo)
+
     @OptIn(ExperimentalCamera2Interop::class)
-    private fun cameraId(camera: Camera): String = Camera2CameraInfo.from(camera.cameraInfo).cameraId
+    private fun cameraId(info: CameraInfo): String = Camera2CameraInfo.from(info).cameraId
 
     private fun fail(message: String) {
         stopPortraitPreview()
@@ -1803,6 +1920,10 @@ class CameraSession(
         const val PROBE_LIMIT_MS = 15_000L
         const val TEMP_DIRECT_PREFIX = "direct_"
         const val DIRECT_RETRY_DELAY_MS = 1_500L
+
+        /** A night burst planned before the preview reported its exposure: a typical dim scene. */
+        const val NIGHT_FALLBACK_EXPOSURE_NS = 33_000_000L
+        const val NIGHT_FALLBACK_ISO = 800
         const val CAMERA_CLOSE_WAIT_MS = 3_000L
         const val PROBE_RETRY_DELAY_MS = 1_500L
         const val COUNTDOWN_STEP_MS = 1_000L

@@ -13,6 +13,8 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
@@ -22,11 +24,17 @@ import android.os.HandlerThread
 import android.util.Log
 import android.util.Size
 import android.view.Surface
+import cz.furmanek.motionphoto.night.NightPlan
+import cz.furmanek.motionphoto.night.NightSensor
+import cz.furmanek.motionphoto.night.YuvFrame
+import cz.furmanek.motionphoto.night.copyYuv
+import cz.furmanek.motionphoto.night.nightSensor
 import java.io.File
 import java.util.concurrent.Executor
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -37,12 +45,13 @@ import kotlinx.coroutines.withTimeoutOrNull
 class DirectCameraException(message: String, cause: Throwable? = null, val busy: Boolean = false) : Exception(message, cause)
 
 /**
- * A back camera opened through Camera2 directly, for lenses the phone hides from its list (CameraX only binds
- * listed cameras): a preview into a surface the UI owns and full-size 4:3 JPEG stills. Call from the main thread;
- * Camera2 callbacks run on the camera's own thread. [close] once done; the object is not reusable.
+ * A camera opened through Camera2 directly, for lenses the phone hides from its list (CameraX only binds listed
+ * cameras) and for the app's own night: a preview into a surface the UI owns, and full-size 4:3 JPEG stills or,
+ * with [night], bursts of YUV frames at a set exposure. Call from the main thread; Camera2 callbacks run on the
+ * camera's own thread. [close] once done; the object is not reusable.
  */
 @SuppressLint("MissingPermission") // Only opened from the camera screen, which has the permission.
-class DirectCamera(context: Context, val cameraId: String) {
+class DirectCamera(context: Context, val cameraId: String, val night: Boolean = false) {
 
     private val manager = context.getSystemService(CameraManager::class.java)
         ?: throw DirectCameraException("no CameraManager")
@@ -71,11 +80,35 @@ class DirectCamera(context: Context, val cameraId: String) {
         .let { largest43(it, MAX_PREVIEW_LONG_SIDE) }
         ?.let { (w, h) -> Size(w, h) }
         ?: throw DirectCameraException("camera $cameraId has no 4:3 preview size")
-    private val jpegSize: Size = streams.getOutputSizes(ImageFormat.JPEG).orEmpty()
+    private val stillFormat = if (night) ImageFormat.YUV_420_888 else ImageFormat.JPEG
+
+    /** Stills: the largest 4:3 JPEG, or for night the largest 4:3 YUV the merge can hold in memory. */
+    private val stillSize: Size = streams.getOutputSizes(stillFormat).orEmpty()
         .map { it.width to it.height }
-        .let { largest43(it) }
+        .let { if (night) largest43(it, MAX_NIGHT_LONG_SIDE) else largest43(it) }
         ?.let { (w, h) -> Size(w, h) }
-        ?: throw DirectCameraException("camera $cameraId has no 4:3 JPEG size")
+        ?: throw DirectCameraException("camera $cameraId has no 4:3 still size")
+
+    /** What a night burst can set by hand. */
+    val nightSensor: NightSensor = nightSensor(characteristics)
+
+    /** The night frames' size. */
+    val nightFrameSize: Size get() = stillSize
+
+    /** What auto exposure and focus last chose for the preview; null until the first frame. */
+    @Volatile var lastExposureNs: Long? = null
+        private set
+    @Volatile var lastIso: Int? = null
+        private set
+    @Volatile private var lastFocusDistance: Float? = null
+
+    private val previewResults = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { lastExposureNs = it }
+            result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { lastIso = it }
+            result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastFocusDistance = it }
+        }
+    }
 
     private val thread = HandlerThread("direct-camera").apply { start() }
     private val handler = Handler(thread.looper)
@@ -105,11 +138,12 @@ class DirectCamera(context: Context, val cameraId: String) {
             throw DirectCameraException("closed while opening")
         }
         device = camera
-        val reader = ImageReader.newInstance(jpegSize.width, jpegSize.height, ImageFormat.JPEG, 2).also { reader = it }
+        val images = if (night) NIGHT_READER_IMAGES else 2
+        val reader = ImageReader.newInstance(stillSize.width, stillSize.height, stillFormat, images).also { reader = it }
         this.preview = preview
         session = configure(camera, listOf(preview, reader.surface))
         repeatPreview()
-        Log.i(TAG, "Camera $cameraId open: preview $previewSize, JPEG $jpegSize, orientation $sensorOrientation")
+        Log.i(TAG, "Camera $cameraId open: preview $previewSize, still $stillSize, night $night, orientation $sensorOrientation")
     }
 
     private suspend fun openDevice(): CameraDevice {
@@ -259,6 +293,94 @@ class DirectCamera(context: Context, val cameraId: String) {
         withContext(Dispatchers.IO) { file.writeBytes(bytes) }
     }
 
+    /**
+     * Shoots [plan]'s burst (night cameras only) and hands each frame to [onFrame] in order, on the caller's
+     * dispatcher. The frames reuse [NIGHT_BUFFERS] buffers: one that arrives while all are still being merged is
+     * skipped. The preview shows the burst and resumes after it. Returns how many frames [onFrame] got.
+     */
+    suspend fun captureNight(plan: NightPlan, onFrame: suspend (YuvFrame) -> Unit): Int {
+        check(night) { "not a night camera" }
+        val camera = device ?: throw DirectCameraException("camera $cameraId not open")
+        val session = session ?: throw DirectCameraException("camera $cameraId not open")
+        val reader = reader ?: throw DirectCameraException("camera $cameraId not open")
+        val preview = preview ?: throw DirectCameraException("camera $cameraId not open")
+        val free = Channel<YuvFrame>(NIGHT_BUFFERS)
+        repeat(NIGHT_BUFFERS) { free.trySend(YuvFrame(stillSize.width, stillSize.height)) }
+        val ready = Channel<YuvFrame>(NIGHT_BUFFERS)
+        // Images and failures both land on the camera thread, so a plain counter is enough.
+        var arrived = 0
+        // Frames a timed-out burst left behind would otherwise start this one.
+        while (true) reader.acquireNextImage()?.close() ?: break
+        fun arrive() {
+            if (++arrived >= plan.frames) ready.close()
+        }
+        reader.setOnImageAvailableListener({ r ->
+            r.acquireNextImage()?.use { image ->
+                val frame = free.tryReceive().getOrNull()
+                if (frame == null) {
+                    Log.w(TAG, "Night frame skipped: the merge is behind")
+                } else {
+                    copyYuv(image, frame)
+                    ready.trySend(frame)
+                }
+            }
+            arrive()
+        }, handler)
+        val focus = lastFocusDistance
+        val requests = List(plan.frames) {
+            camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                addTarget(reader.surface)
+                addTarget(preview)
+                applySettings()
+                set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                val exposure = plan.exposureNs
+                val iso = plan.iso
+                if (exposure != null && iso != null) {
+                    set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+                    set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
+                    set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                    set(CaptureRequest.SENSOR_FRAME_DURATION, exposure)
+                } else {
+                    set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, exposureRange.last)
+                }
+                // Focus stays where the preview found it: refocusing mid-burst would blur frames.
+                if (focus != null) {
+                    set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+                    set(CaptureRequest.LENS_FOCUS_DISTANCE, focus)
+                }
+            }.build()
+        }
+        try {
+            session.stopRepeating()
+            session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                    Log.w(TAG, "Night frame failed: ${failure.reason}")
+                    arrive()
+                }
+            }, handler)
+        } catch (e: CameraAccessException) {
+            repeatPreview()
+            throw DirectCameraException("night burst refused: ${e.reason}", e)
+        } catch (e: IllegalStateException) {
+            throw DirectCameraException("night burst refused", e)
+        }
+        var delivered = 0
+        try {
+            withTimeoutOrNull(plan.durationMs + NIGHT_EXTRA_MS) {
+                for (frame in ready) {
+                    onFrame(frame)
+                    delivered++
+                    free.trySend(frame)
+                }
+            }
+        } finally {
+            reader.setOnImageAvailableListener(null, null)
+            repeatPreview()
+        }
+        if (delivered == 0) throw DirectCameraException("no night frames from camera $cameraId")
+        return delivered
+    }
+
     /** Closes the camera; safe to call more than once and while opening. */
     fun close() {
         if (closed) return
@@ -304,7 +426,7 @@ class DirectCamera(context: Context, val cameraId: String) {
                 addTarget(preview)
                 applySettings()
             }
-            session.setRepeatingRequest(request.build(), null, handler)
+            session.setRepeatingRequest(request.build(), previewResults, handler)
         }
     }
 
@@ -331,5 +453,13 @@ class DirectCamera(context: Context, val cameraId: String) {
         const val METERING_FRACTION = 0.1f
         const val JPEG_QUALITY: Byte = 95
         const val THREAD_LINGER_MS = 2_000L
+
+        /** Night frames up to 4096 × 3072: a 50 MP sensor's full size would not fit the merge in memory. */
+        const val MAX_NIGHT_LONG_SIDE = 4096
+        const val NIGHT_READER_IMAGES = 3
+        const val NIGHT_BUFFERS = 3
+
+        /** On top of the burst itself: the first frame's latency and the last frame's merge. */
+        const val NIGHT_EXTRA_MS = 4_000L
     }
 }

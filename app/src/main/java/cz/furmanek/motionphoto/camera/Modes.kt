@@ -15,7 +15,8 @@ fun availableModes(capabilities: CameraCapabilities, lensFacing: Int): List<Capt
         CaptureMode.PHOTO -> true
         CaptureMode.SLOW_MOTION -> capabilities.slowMotionFps.isNotEmpty()
         CaptureMode.PORTRAIT -> ExtensionMode.BOKEH in capabilities.extensionModes || capabilities.customPortrait
-        CaptureMode.NIGHT -> ExtensionMode.NIGHT in capabilities.extensionModes
+        // The app's own night works on any camera; the maker's is the alternative where the phone has it.
+        CaptureMode.NIGHT -> true
         CaptureMode.TIMELAPSE -> true
         CaptureMode.PANORAMA -> lensFacing == LENS_FACING_BACK && capabilities.hasRotationVector && capabilities.hasOptics
     }
@@ -24,6 +25,10 @@ fun availableModes(capabilities: CameraCapabilities, lensFacing: Int): List<Capt
 /** Portrait made by the app rather than the maker: the maker's bokeh wins wherever the camera has it. */
 fun usesCustomPortrait(mode: CaptureMode, capabilities: CameraCapabilities): Boolean =
     mode == CaptureMode.PORTRAIT && ExtensionMode.BOKEH !in capabilities.extensionModes && capabilities.customPortrait
+
+/** Night by the maker's processing: chosen in the settings, or the app's own failed, and the phone has it. */
+fun usesMakerNight(settings: CameraSettings, capabilities: CameraCapabilities, customBroken: Boolean): Boolean =
+    ExtensionMode.NIGHT in capabilities.extensionModes && (settings.nightMaker || customBroken)
 
 /** A stored mode this camera cannot do (other phone, other lens) falls back to Photo. */
 fun fallbackMode(requested: CaptureMode, available: List<CaptureMode>): CaptureMode =

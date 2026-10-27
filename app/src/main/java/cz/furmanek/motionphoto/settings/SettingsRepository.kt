@@ -43,6 +43,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             mirrorFrontCamera = prefs[Keys.MIRROR_FRONT] ?: defaults.mirrorFrontCamera,
             slowMotionFps = prefs[Keys.SLOW_MOTION_FPS] ?: defaults.slowMotionFps,
             hdr = prefs[Keys.HDR] ?: defaults.hdr,
+            nightMaker = prefs[Keys.NIGHT_MAKER] ?: defaults.nightMaker,
             timelapseIntervalMs = prefs[Keys.TIMELAPSE_INTERVAL] ?: defaults.timelapseIntervalMs,
             portraitResolution = prefs.enum(Keys.PORTRAIT_RESOLUTION, defaults.portraitResolution),
             portraitBlur = clampBlur(prefs[Keys.PORTRAIT_BLUR] ?: defaults.portraitBlur),
@@ -67,6 +68,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         prefs[Keys.MIRROR_FRONT] = settings.mirrorFrontCamera
         prefs[Keys.SLOW_MOTION_FPS] = settings.slowMotionFps
         prefs[Keys.HDR] = settings.hdr
+        prefs[Keys.NIGHT_MAKER] = settings.nightMaker
         prefs[Keys.TIMELAPSE_INTERVAL] = settings.timelapseIntervalMs
         prefs[Keys.PORTRAIT_RESOLUTION] = settings.portraitResolution.name
         prefs[Keys.PORTRAIT_BLUR] = settings.portraitBlur
@@ -93,6 +95,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val MIRROR_FRONT = booleanPreferencesKey("mirror_front")
         val SLOW_MOTION_FPS = intPreferencesKey("slow_motion_fps")
         val HDR = booleanPreferencesKey("hdr")
+        val NIGHT_MAKER = booleanPreferencesKey("night_maker")
         val TIMELAPSE_INTERVAL = longPreferencesKey("timelapse_interval_ms")
         val PORTRAIT_RESOLUTION = stringPreferencesKey("portrait_resolution")
         val PORTRAIT_BLUR = floatPreferencesKey("portrait_blur")

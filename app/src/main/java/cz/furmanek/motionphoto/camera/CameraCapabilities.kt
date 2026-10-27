@@ -1,5 +1,6 @@
 package cz.furmanek.motionphoto.camera
 
+import cz.furmanek.motionphoto.night.NightSensor
 import cz.furmanek.motionphoto.settings.VideoQualitySetting
 
 /** A back camera the phone exposes on its own (e.g. ultra-wide), with its zoom relative to the default camera. */
@@ -38,6 +39,8 @@ data class CameraCapabilities(
     val macro: MacroSetup? = null,
     /** The zoom chip of a hidden ultra-wide camera (e.g. 0.5); null when there is none or it failed. */
     val ultraWideZoom: Float? = null,
+    /** What the default back camera allows by hand, for the app's own night; null when unknown. */
+    val nightSensor: NightSensor? = null,
 ) {
     val hasOptics: Boolean get() = focalMm > 0f && sensorWidthMm > 0f && sensorHeightMm > 0f
 }

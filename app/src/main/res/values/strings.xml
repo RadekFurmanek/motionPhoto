@@ -121,4 +121,10 @@
     <string name="probe_stage_frame">čekám na snímek…</string>
     <string name="probe_stage_closing">zavírám…</string>
     <string name="hidden_camera_failed">Skrytý fotoaparát nefunguje (%1$s), používám hlavní.</string>
+    <string name="night_failed">Noční režim aplikace nefunguje (%1$s), používám náhradní.</string>
+    <string name="night_hold_still">Drž telefon v klidu</string>
+    <string name="settings_night_maker">Noční režim od výrobce</string>
+    <string name="settings_night_maker_summary">Místo nočního zpracování aplikace použít to z telefonu</string>
+    <string name="camera_night_manual">Noc: expozice až %1$s s, ISO až %2$d, ruční expozice ano</string>
+    <string name="camera_night_auto">Noc: ruční expozice ne, jen automatická</string>
 </resources>

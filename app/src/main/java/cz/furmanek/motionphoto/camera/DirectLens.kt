@@ -2,8 +2,8 @@ package cz.furmanek.motionphoto.camera
 
 import kotlin.math.roundToInt
 
-/** What the hidden camera, opened through Camera2, is used for. */
-enum class DirectKind { MACRO, ULTRA_WIDE }
+/** What a camera opened through Camera2 is for: a hidden lens (Macro, the ultra-wide) or the app's own night. */
+enum class DirectKind { MACRO, ULTRA_WIDE, NIGHT }
 
 /** A hidden lens counts as ultra-wide when its field of view is at least this much wider than the default one's. */
 private const val ULTRA_WIDE_FACTOR = 1.3f
