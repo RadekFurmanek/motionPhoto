@@ -490,11 +490,22 @@ class CameraSession(
         requestBind()
     }
 
-    /** A zoom chip: the hidden ultra-wide's chip opens it; any other leaves it and zooms the bound camera. */
+    /**
+     * A zoom chip: the hidden ultra-wide's chip opens it; any other leaves it and zooms the bound camera. Either
+     * ends Macro first.
+     */
     fun selectZoomPreset(ratio: Float) {
         if (isLocked()) return
         val wideZoom = ultraWideZoom
-        if (wideZoom != null && ratio == wideZoom && _state.value.capabilities?.ultraWideZoom == wideZoom) {
+        val wide = wideZoom != null && ratio == wideZoom && _state.value.capabilities?.ultraWideZoom == wideZoom
+        if (macroOn) {
+            // Macro's camera goes away: the zoom waits for the next bind, or the ultra-wide opens instead.
+            setMacroOff()
+            if (wide) ultraWideOn = true else pendingZoom = ratio
+            requestBind()
+            return
+        }
+        if (wide) {
             selectUltraWide(true)
             return
         }
@@ -536,7 +547,11 @@ class CameraSession(
     private fun updateDirect(): Boolean {
         val wanted = wantedDirect()
         val kind = wanted?.first
-        if (_state.value.direct != kind) _state.update { it.copy(direct = kind, zoomRatio = directZoomRatio(kind, 1f)) }
+        if (_state.value.direct != kind) {
+            // Macro and the ultra-wide can share the hidden camera: it stays open, back at its widest.
+            directCamera?.setZoom(1f)
+            _state.update { it.copy(direct = kind, zoomRatio = directZoomRatio(kind, 1f)) }
+        }
         val id = wanted?.second
         if (id == directCameraId && directTexture === directTextureUsed) return id != null
         closeDirect()

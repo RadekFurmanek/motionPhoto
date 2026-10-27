@@ -29,10 +29,10 @@ private val ActiveYellow = Color(0xFFFFD54F)
 fun formatZoom(ratio: Float): String =
     if (abs(ratio - ratio.toInt()) < MATCH_TOLERANCE) "${ratio.toInt()}×" else "%.1f×".format(ratio)
 
-/** Zoom presets; the active chip shows the exact zoom when it sits between presets. */
+/** Zoom presets; the active chip shows the exact zoom when it sits between presets. Without [highlight] none is lit. */
 @Composable
-fun ZoomChips(presets: List<Float>, zoomRatio: Float, onSelect: (Float) -> Unit, modifier: Modifier = Modifier) {
-    val active = presets.lastOrNull { it <= zoomRatio + MATCH_TOLERANCE } ?: presets.first()
+fun ZoomChips(presets: List<Float>, zoomRatio: Float, onSelect: (Float) -> Unit, modifier: Modifier = Modifier, highlight: Boolean = true) {
+    val active = if (highlight) presets.lastOrNull { it <= zoomRatio + MATCH_TOLERANCE } ?: presets.first() else null
     Row(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         presets.forEach { preset ->
             val isActive = preset == active

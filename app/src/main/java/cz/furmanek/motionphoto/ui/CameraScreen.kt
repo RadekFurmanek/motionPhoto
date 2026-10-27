@@ -407,15 +407,14 @@ private fun BottomControls(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (macroOffered) MacroChip(active = state.macro, onClick = { if (!locked) viewModel.setMacro(!state.macro) })
-                // Macro picks its own lens and zoom.
-                if (!state.macro) {
-                    val ultraWideZoom = capabilities.ultraWideZoom.takeIf { settings.mode == CaptureMode.PHOTO && state.lensFacing == LENS_FACING_BACK }
-                    ZoomChips(
-                        zoomPresets(capabilities.minZoom, capabilities.maxZoom, ultraWideZoom),
-                        state.zoomRatio,
-                        onSelect = { if (!locked) viewModel.setZoom(it) },
-                    )
-                }
+                // Macro picks its own lens and zoom, so no zoom chip is lit; picking one ends Macro.
+                val ultraWideZoom = capabilities.ultraWideZoom.takeIf { settings.mode == CaptureMode.PHOTO && state.lensFacing == LENS_FACING_BACK }
+                ZoomChips(
+                    zoomPresets(capabilities.minZoom, capabilities.maxZoom, ultraWideZoom),
+                    state.zoomRatio,
+                    onSelect = { if (!locked) viewModel.setZoom(it) },
+                    highlight = !state.macro,
+                )
             }
         }
 
