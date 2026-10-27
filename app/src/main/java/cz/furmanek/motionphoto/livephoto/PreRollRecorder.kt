@@ -9,6 +9,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaRecorder
+import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.RequiresPermission
@@ -45,6 +46,7 @@ class PreRollRecorder(private val withAudio: Boolean, private val mirrored: Bool
     private var height = 0
     private var rotationDegrees = 0
     private var clockOffsetNs: Long? = null
+    private var lastKeyRequestUs = 0L
     private var running = false
     private var audioThread: Thread? = null
 
@@ -111,7 +113,14 @@ class PreRollRecorder(private val withAudio: Boolean, private val mirrored: Bool
             if (index >= 0) {
                 val input = codec.getInputImage(index) ?: error("Encoder gave no input image")
                 copyFrame(image, input)
-                codec.queueInputBuffer(index, 0, width * height * 3 / 2, toRealtimeUs(image.imageInfo.timestamp), 0)
+                val timeUs = toRealtimeUs(image.imageInfo.timestamp)
+                // The encoder spaces key frames by frame count at its nominal rate; in low light the camera runs
+                // slower, so ask for them by time to keep a clean clip start close to the pre-roll.
+                if (timeUs - lastKeyRequestUs >= KEY_FRAME_INTERVAL_US) {
+                    codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+                    lastKeyRequestUs = timeUs
+                }
+                codec.queueInputBuffer(index, 0, width * height * 3 / 2, timeUs, 0)
             }
             drainVideo(codec)
         } catch (e: Exception) {
@@ -168,44 +177,59 @@ class PreRollRecorder(private val withAudio: Boolean, private val mirrored: Bool
         }
         video = null
         videoFormat = null
+        lastKeyRequestUs = 0L
     }
 
     /** Camera frame times are usually on the elapsed-realtime clock; some devices use uptime instead. */
     private fun toRealtimeUs(timestampNs: Long): Long {
         val offset = clockOffsetNs ?: run {
             val realtime = SystemClock.elapsedRealtimeNanos()
-            (if (abs(realtime - timestampNs) > UPTIME_GUESS_NS) realtime - SystemClock.uptimeNanos() else 0L)
+            (if (abs(realtime - timestampNs) > UPTIME_GUESS_NS) realtime - SystemClock.uptimeMillis() * 1_000_000 else 0L)
                 .also { clockOffsetNs = it }
         }
         return (timestampNs + offset) / 1_000
     }
 
     private fun copyFrame(src: ImageProxy, dst: Image) {
+        // Mirroring is left-right on screen: across the sensor's rows when the frame is turned a quarter.
+        val sideways = src.imageInfo.rotationDegrees % 180 != 0
+        val flipX = mirrored && !sideways
+        val flipY = mirrored && sideways
         for (plane in 0 until 3) {
             val w = if (plane == 0) width else width / 2
             val h = if (plane == 0) height else height / 2
-            copyPlane(src.planes[plane].buffer, src.planes[plane].rowStride, src.planes[plane].pixelStride, dst.planes[plane], w, h)
+            val source = src.planes[plane]
+            copyPlane(source.buffer, source.rowStride, source.pixelStride, dst.planes[plane], w, h, flipX, flipY)
         }
     }
 
-    /** Row by row through arrays; mirrors horizontally when [mirrored]. */
-    private fun copyPlane(src: ByteBuffer, srcRowStride: Int, srcPixelStride: Int, dst: Image.Plane, w: Int, h: Int) {
+    /** Row by row through arrays, flipping columns ([flipX]) or rows ([flipY]). */
+    private fun copyPlane(
+        src: ByteBuffer,
+        srcRowStride: Int,
+        srcPixelStride: Int,
+        dst: Image.Plane,
+        w: Int,
+        h: Int,
+        flipX: Boolean,
+        flipY: Boolean,
+    ) {
         val dstBuffer = dst.buffer
         val dstPixelStride = dst.pixelStride
         val srcRowLength = (w - 1) * srcPixelStride + 1
         val dstRowLength = (w - 1) * dstPixelStride + 1
         if (srcRow.size < srcRowLength) srcRow = ByteArray(srcRowLength)
         if (dstRow.size < dstRowLength) dstRow = ByteArray(dstRowLength)
-        val direct = srcPixelStride == 1 && dstPixelStride == 1 && !mirrored
+        val direct = srcPixelStride == 1 && dstPixelStride == 1 && !flipX
         for (y in 0 until h) {
-            src.position(y * srcRowStride)
+            src.position((if (flipY) h - 1 - y else y) * srcRowStride)
             src.get(srcRow, 0, srcRowLength)
             if (!direct) {
                 dstBuffer.position(y * dst.rowStride)
                 // Interleaved destinations (NV12) share bytes with the other chroma plane: keep what is there.
                 dstBuffer.get(dstRow, 0, dstRowLength)
                 for (x in 0 until w) {
-                    val sx = if (mirrored) w - 1 - x else x
+                    val sx = if (flipX) w - 1 - x else x
                     dstRow[x * dstPixelStride] = srcRow[sx * srcPixelStride]
                 }
             }
@@ -295,6 +319,7 @@ class PreRollRecorder(private val withAudio: Boolean, private val mirrored: Bool
         private const val AUDIO_JOIN_MS = 500L
         private const val FRAME_RATE = 30
         private const val KEY_FRAME_INTERVAL_S = 0.5f
+        private const val KEY_FRAME_INTERVAL_US = 500_000L
         private const val BITS_PER_PIXEL = 4
         private const val MAX_BIT_RATE = 20_000_000
         private const val UPTIME_GUESS_NS = 1_000_000_000L

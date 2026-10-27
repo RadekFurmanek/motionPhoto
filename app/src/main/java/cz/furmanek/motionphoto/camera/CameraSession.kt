@@ -17,6 +17,7 @@ import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ExperimentalZeroShutterLag
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.MeteringPointFactory
@@ -54,6 +55,7 @@ import cz.furmanek.motionphoto.panorama.stitchPanorama
 import cz.furmanek.motionphoto.panorama.toJpeg
 import cz.furmanek.motionphoto.portrait.MlKitSubjectMasker
 import cz.furmanek.motionphoto.portrait.PortraitOutcome
+import cz.furmanek.motionphoto.livephoto.PreRollRecorder
 import cz.furmanek.motionphoto.portrait.PortraitPreview
 import cz.furmanek.motionphoto.portrait.PortraitProcessor
 import cz.furmanek.motionphoto.portrait.clampBlur
@@ -70,6 +72,7 @@ import cz.furmanek.motionphoto.settings.shutterSoundRequired
 import cz.furmanek.motionphoto.timelapse.TimelapseOutcome
 import cz.furmanek.motionphoto.timelapse.classifyTimelapse
 import cz.furmanek.motionphoto.location.LocationProvider
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.atan
 import kotlinx.coroutines.CancellationException
@@ -88,6 +91,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
@@ -134,6 +138,8 @@ data class SessionState(
     val lastCapture: Uri? = null,
     /** False when this camera cannot stream preview, still and video together; photos are then plain. */
     val livePhotoAvailable: Boolean = true,
+    /** The live photo clip starts before the press: after it only [PreRollRecorder.POST_ROLL_MS] is left to record. */
+    val livePhotoPreRoll: Boolean = false,
     val panorama: PanoramaUiState? = null,
 ) {
     /** A capture, recording or panorama runs: mode, camera and capture settings must not change. */
@@ -228,6 +234,18 @@ class CameraSession(
 
     /** The bound Portrait mode is the app's own (no maker bokeh): photos are processed before saving. */
     private var customPortraitBound = false
+
+    /** The bound live photo feeds its analysis stream to a continuous encoder, so its clip can start before the press. */
+    private var preRollBound = false
+
+    /** Encoding the live photo's pre-roll while it is bound and the app is on screen; null otherwise. */
+    private var preRoll: PreRollRecorder? = null
+    private var preRollAnalysis: ImageAnalysis? = null
+    private var preRollWatch: Job? = null
+    private val preRollExecutor = Executors.newSingleThreadExecutor()
+
+    /** The pre-roll encoder broke on this camera; live photos then record after the press until the app restarts. */
+    private var preRollBroken = false
     private var target: PreviewTarget? = null
     private var boundKey: BindingKey? = null
     private var bindJob: Job? = null
@@ -312,6 +330,7 @@ class CameraSession(
         // A panorama and the live portrait run only while the app is on screen.
         if (!uiVisible) cancelPanorama()
         updatePortraitPreview()
+        updatePreRoll()
         routePreview()
         // Another screen (capture for another app) may have bound the camera meanwhile, which unbinds ours.
         val preview = preview
@@ -457,6 +476,7 @@ class CameraSession(
     private class Shot(val media: SavedMedia, val notice: String? = null)
 
     private suspend fun shoot(imageCapture: ImageCapture): Shot = coroutineScope {
+        val pressUs = SystemClock.elapsedRealtimeNanos() / 1_000
         val capturedAt = System.currentTimeMillis()
         val location = async {
             if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
@@ -464,6 +484,7 @@ class CameraSession(
         playSound(MediaActionSound.SHUTTER_CLICK)
         val mirrored = settings.mirrorFrontCamera && _state.value.lensFacing == LENS_FACING_FRONT
         val videoCapture = videoCapture
+        val preRoll = preRoll
         when {
             settings.mode == CaptureMode.PORTRAIT && customPortraitBound -> {
                 val resolution = settings.portraitResolution
@@ -474,6 +495,8 @@ class CameraSession(
                 }
                 Shot(media, portraitNotice(outcome)?.let(app::getString))
             }
+            settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && preRoll != null ->
+                Shot(photoCapture.captureMotionPhotoPreRoll(imageCapture, preRoll, capturedAt, pressUs, mirrored, location))
             settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && videoCapture != null ->
                 Shot(photoCapture.captureMotionPhoto(imageCapture, videoCapture, capturedAt, mirrored, location))
             else -> Shot(photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location))
@@ -837,10 +860,12 @@ class CameraSession(
         }
     }
 
+    @OptIn(ExperimentalZeroShutterLag::class)
     private suspend fun bind(key: BindingKey, target: PreviewTarget) {
         _state.update { it.copy(status = SessionStatus.OPENING, errorMessage = null) }
         // The analysis stream is about to be replaced (or dropped by another mode).
         stopPortraitPreview()
+        stopPreRoll()
         val provider = provider ?: ProcessCameraProvider.awaitInstance(app).also { provider = it }
 
         val selector = selectorFor(provider, key) ?: run {
@@ -902,7 +927,8 @@ class CameraSession(
         var lastError: RuntimeException? = null
         val wantsVideoExtras = key.videoFps60 || key.videoStabilization
         val attempts = bindingAttempts(key.mode, key.livePhoto, wantsVideoExtras, customPortrait)
-        for ((index, attempt) in attempts.withIndex()) {
+        for (attempt in attempts) {
+            if (attempt.preRoll && preRollBroken) continue
             val kinds = attempt.kinds
             val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect)).build()
                 .also {
@@ -914,7 +940,10 @@ class CameraSession(
                     // Minimal shutter lag keeps a live photo's still close to its stamped moment in the clip;
                     // portrait (the maker's or ours), night and HDR are about quality instead.
                     .setCaptureMode(
-                        if (extensionMode == null && !customPortrait) {
+                        if (attempt.preRoll && cameraInfo.isZslSupported) {
+                            // The still should be the moment of the press, which the pre-roll clip is built around.
+                            ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
+                        } else if (extensionMode == null && !customPortrait) {
                             ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                         } else {
                             ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
@@ -942,7 +971,12 @@ class CameraSession(
                     mirror = key.mirrorFrontCamera,
                 )
             }
-            val imageAnalysis = if (UseCaseKind.ANALYSIS in kinds) {
+            val imageAnalysis = if (attempt.preRoll) {
+                // YUV for the encoder, at most 1080p; the default backpressure drops frames the encoder cannot take.
+                ImageAnalysis.Builder()
+                    .setResolutionSelector(analysisResolution(photoAspect, preRollSize(photoAspect)))
+                    .build()
+            } else if (UseCaseKind.ANALYSIS in kinds) {
                 ImageAnalysis.Builder()
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -969,9 +1003,10 @@ class CameraSession(
                 continue
             }
             // A live photo that had to drop its video stream is not available on this camera.
-            val livePhotoAvailable = !(key.mode == CaptureMode.PHOTO && key.livePhoto && index > 0)
+            val livePhotoAvailable = !(key.mode == CaptureMode.PHOTO && key.livePhoto && UseCaseKind.VIDEO !in kinds && !attempt.preRoll)
             this.imageAnalysis = imageAnalysis
             customPortraitBound = customPortrait
+            preRollBound = attempt.preRoll
             onBound(key, bound, preview, imageCapture, videoCapture, capabilities, lensFacing, livePhotoAvailable)
             return
         }
@@ -1028,6 +1063,7 @@ class CameraSession(
         }
         imageAnalysis = null
         customPortraitBound = false
+        preRollBound = false
         onBound(key, bound, preview, null, videoCapture, capabilities, cameraInfo.lensFacing, livePhotoAvailable = true)
     }
 
@@ -1068,6 +1104,45 @@ class CameraSession(
             )
         }
         updatePortraitPreview()
+        updatePreRoll()
+    }
+
+    /** Runs the live photo's pre-roll encoder while it is bound and the app is on screen; stops it otherwise. */
+    private fun updatePreRoll() {
+        val analysis = imageAnalysis
+        if (!preRollBound || !uiVisible || analysis == null || camera == null) {
+            stopPreRoll()
+            return
+        }
+        if (preRollAnalysis === analysis) return
+        stopPreRoll()
+        val mirrored = settings.mirrorFrontCamera && _state.value.lensFacing == LENS_FACING_FRONT
+        val recorder = PreRollRecorder(withAudio = videoRecorder.hasAudioPermission(), mirrored = mirrored)
+        analysis.setAnalyzer(preRollExecutor, recorder.analyzer)
+        recorder.start()
+        preRoll = recorder
+        preRollAnalysis = analysis
+        _state.update { it.copy(livePhotoPreRoll = true) }
+        preRollWatch = scope.launch {
+            recorder.failed.first { it }
+            // Live photos keep working, recorded after the press as before.
+            Log.w(TAG, "Pre-roll encoder failed; live photos record after the press")
+            preRollBroken = true
+            boundKey = null
+            requestBind()
+        }
+    }
+
+    private fun stopPreRoll() {
+        preRollWatch?.cancel()
+        preRollWatch = null
+        preRollAnalysis?.clearAnalyzer()
+        preRollAnalysis = null
+        _state.update { it.copy(livePhotoPreRoll = false) }
+        val recorder = preRoll ?: return
+        preRoll = null
+        // Joining the microphone thread must not hold up the main thread.
+        scope.launch(Dispatchers.Default) { recorder.stop() }
     }
 
     /** Runs the live portrait while a custom portrait is bound and the app is on screen; stops it otherwise. */
@@ -1141,12 +1216,14 @@ class CameraSession(
                         _state.update { it.copy(status = SessionStatus.ERROR, errorMessage = describe(error.code)) }
                         // A stale blurred frame must not stay over the preview; it starts again once the camera opens.
                         stopPortraitPreview()
+                        stopPreRoll()
                         // The Recorder ends a video on its own; a time-lapse keeps what it has.
                         if (_state.value.recording?.kind == RecordingKind.TIMELAPSE) stopTimelapse()
                     } else if (cameraState.type == CameraState.Type.OPEN) {
                         _state.update { it.copy(status = SessionStatus.READY, errorMessage = null) }
-                        // Back from an error without a new bind: the live portrait starts again.
+                        // Back from an error without a new bind: the live portrait and the pre-roll start again.
                         updatePortraitPreview()
+                        updatePreRoll()
                     }
                 }
             }
@@ -1201,6 +1278,7 @@ class CameraSession(
 
     private fun fail(message: String) {
         stopPortraitPreview()
+        stopPreRoll()
         camera = null
         boundKey = null
         _state.update { it.copy(status = SessionStatus.ERROR, errorMessage = message) }
@@ -1226,6 +1304,10 @@ class CameraSession(
         val aspect = if (key.portrait) Rational(width, height) else Rational(height, width)
         return ViewPort.Builder(aspect, key.displayRotation).setScaleType(ViewPort.FILL_CENTER).build()
     }
+
+    /** The pre-roll's analysis size: 1080 lines, as wide as the photo's aspect asks. */
+    private fun preRollSize(aspect: Int) =
+        if (aspect == AspectRatio.RATIO_16_9) android.util.Size(1920, 1080) else android.util.Size(1440, 1080)
 
     private fun buildVideoCapture(
         quality: VideoQualitySetting,

@@ -18,6 +18,8 @@ import androidx.core.content.ContextCompat
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.media.MediaStoreWriter
 import cz.furmanek.motionphoto.media.SavedMedia
+import cz.furmanek.motionphoto.livephoto.PreRollRecorder
+import cz.furmanek.motionphoto.livephoto.stillPositionUs
 import cz.furmanek.motionphoto.portrait.PORTRAIT_TEMP_PREFIX
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -74,6 +76,45 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
                     SavedMedia(uri, MediaKind.MOTION_PHOTO)
                 } else {
                     // The clip failed but the still is fine: keep the shot as an ordinary photo.
+                    SavedMedia(writer.savePhoto(stillFile, capturedAtMillis, location), MediaKind.PHOTO)
+                }
+            }
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) {
+                videoFile.delete()
+                stillFile.delete()
+            }
+        }
+    }
+
+    /**
+     * Live photo whose clip runs from [PreRollRecorder.PRE_ROLL_MS] before the press at [pressUs] (elapsed
+     * realtime) to [PreRollRecorder.POST_ROLL_MS] after it. The still is taken at once; when the clip fails,
+     * the shot is kept as an ordinary photo.
+     */
+    suspend fun captureMotionPhotoPreRoll(
+        imageCapture: ImageCapture,
+        preRoll: PreRollRecorder,
+        capturedAtMillis: Long,
+        pressUs: Long,
+        mirrored: Boolean,
+        location: Deferred<Location?>,
+    ): SavedMedia {
+        val (videoFile, stillFile) = withContext(Dispatchers.IO) {
+            File.createTempFile(TEMP_VIDEO_PREFIX, ".mp4", context.cacheDir) to
+                File.createTempFile(TEMP_STILL_PREFIX, ".jpg", context.cacheDir)
+        }
+        try {
+            val stillUs = TimeUnit.NANOSECONDS.toMicros(imageCapture.takePictureTo(stillFile, mirrored))
+            val clip = preRoll.cut(pressUs, videoFile)
+            Log.d(TAG, "Pre-roll: press $pressUs, still +${stillUs - pressUs} us, clip ${clip?.let { "${it.firstVideoUs - pressUs}..${it.lastVideoUs - pressUs} us" }}")
+            val location = location.await()
+            return withContext(Dispatchers.IO) {
+                if (clip != null) {
+                    val uri = writer.saveMotionPhoto(stillFile, videoFile, stillPositionUs(stillUs, clip), capturedAtMillis, location)
+                    SavedMedia(uri, MediaKind.MOTION_PHOTO)
+                } else {
+                    Log.w(TAG, "Pre-roll clip unavailable; saving the still alone")
                     SavedMedia(writer.savePhoto(stillFile, capturedAtMillis, location), MediaKind.PHOTO)
                 }
             }

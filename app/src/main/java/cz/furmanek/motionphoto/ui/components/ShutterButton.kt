@@ -44,8 +44,8 @@ private val RecordRed = Color(0xFFE53935)
 private val RingWidth = 4.dp
 
 /**
- * Photo: white disc that dips when pressed. While a live photo's clip records, a red ring fills
- * the outer circle; once the clip is done the ring spins until the photo is saved.
+ * Photo: white disc that dips when pressed. While a live photo's clip records ([clipDurationMs] after the
+ * press), a red ring fills the outer circle; once the clip is done the ring spins until the photo is saved.
  * Video: red disc to start, red square to stop.
  * Panorama: white disc with a start arrow, red square to finish.
  */
@@ -58,16 +58,17 @@ fun ShutterButton(
     onClick: () -> Unit,
     processing: Boolean = false,
     isPanorama: Boolean = false,
+    clipDurationMs: Long = PhotoCapture.CLIP_DURATION_MS,
 ) {
     val scope = rememberCoroutineScope()
     val press = remember { Animatable(1f) }
     val progress = remember { Animatable(0f) }
     var clipRecorded by remember { mutableStateOf(false) }
-    LaunchedEffect(showClipProgress) {
+    LaunchedEffect(showClipProgress, clipDurationMs) {
         clipRecorded = false
         progress.snapTo(0f)
         if (showClipProgress) {
-            progress.animateTo(1f, tween(PhotoCapture.CLIP_DURATION_MS.toInt(), easing = LinearEasing))
+            progress.animateTo(1f, tween(clipDurationMs.toInt(), easing = LinearEasing))
             clipRecorded = true
         }
     }
