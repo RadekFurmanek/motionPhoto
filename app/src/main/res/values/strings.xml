@@ -115,4 +115,9 @@
     <string name="probe_busy">obsazený</string>
     <string name="probe_no_frame">otevře se, ale bez obrazu</string>
     <string name="probe_failed">chyba: %1$s</string>
+    <string name="probe_stuck">zaseklo se při: %1$s</string>
+    <string name="probe_stage_opening">otevírám…</string>
+    <string name="probe_stage_configuring">spouštím stream…</string>
+    <string name="probe_stage_frame">čekám na snímek…</string>
+    <string name="probe_stage_closing">zavírám…</string>
 </resources>

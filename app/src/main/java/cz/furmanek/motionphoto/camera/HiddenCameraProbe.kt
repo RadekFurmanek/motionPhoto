@@ -33,9 +33,15 @@ enum class ProbeOutcome {
 
     /** Anything else; the detail says what. */
     FAILED,
+
+    /** A camera call never returned; the detail names the [ProbeStage] it was in. */
+    STUCK,
 }
 
 data class ProbeResult(val outcome: ProbeOutcome, val detail: String = "")
+
+/** Where a probe is; shown while it runs, and named when it gets stuck. */
+enum class ProbeStage { OPENING, CONFIGURING, WAITING_FRAME, CLOSING }
 
 private const val TAG = "HiddenCameraProbe"
 private const val OPEN_TIMEOUT_MS = 4_000L
@@ -45,10 +51,11 @@ private const val PROBE_HEIGHT = 480
 
 /**
  * Opens camera [id] directly through Camera2, streams it into a small reader and waits for one frame; then closes
- * everything. The caller must have let go of its own camera first, or the phone may report it busy.
+ * everything. The caller must have let go of its own camera first, or the phone may report it busy. [onStage]
+ * hears each step as it starts, on the probe's own thread.
  */
 @SuppressLint("MissingPermission") // Only reachable from the camera screen, which has the permission.
-suspend fun probeCamera(context: Context, id: String): ProbeResult {
+suspend fun probeCamera(context: Context, id: String, onStage: (ProbeStage) -> Unit = {}): ProbeResult {
     val manager = context.getSystemService(CameraManager::class.java) ?: return ProbeResult(ProbeOutcome.FAILED, "no CameraManager")
     val thread = HandlerThread("hidden-camera-probe").apply { start() }
     val handler = Handler(thread.looper)
@@ -57,6 +64,7 @@ suspend fun probeCamera(context: Context, id: String): ProbeResult {
     var device: CameraDevice? = null
     try {
         val opened = CompletableDeferred<Result<CameraDevice>>()
+        onStage(ProbeStage.OPENING)
         try {
             manager.openCamera(id, executor, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
@@ -78,7 +86,7 @@ suspend fun probeCamera(context: Context, id: String): ProbeResult {
         } catch (e: IllegalArgumentException) {
             return ProbeResult(ProbeOutcome.BLOCKED, e.message.orEmpty())
         } catch (e: CameraAccessException) {
-            return ProbeResult(accessOutcome(e.reason), e.message.orEmpty())
+            return ProbeResult(accessOutcome(e.reason), "reason ${e.reason}")
         }
         val camera = withTimeoutOrNull(OPEN_TIMEOUT_MS) { opened.await() }
             ?.getOrElse { e -> return (e as? ProbeFailure)?.result ?: ProbeResult(ProbeOutcome.FAILED, e.toString()) }
@@ -95,6 +103,7 @@ suspend fun probeCamera(context: Context, id: String): ProbeResult {
             frame.complete(Unit)
         }, handler)
         val configured = CompletableDeferred<CameraCaptureSession?>()
+        onStage(ProbeStage.CONFIGURING)
         camera.createCaptureSession(
             SessionConfiguration(
                 SessionConfiguration.SESSION_REGULAR,
@@ -114,6 +123,7 @@ suspend fun probeCamera(context: Context, id: String): ProbeResult {
         val session = withTimeoutOrNull(OPEN_TIMEOUT_MS) { configured.await() }
             ?: return ProbeResult(ProbeOutcome.FAILED, "session not configured")
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply { addTarget(reader.surface) }.build()
+        onStage(ProbeStage.WAITING_FRAME)
         session.setRepeatingRequest(request, null, handler)
         return if (withTimeoutOrNull(FRAME_TIMEOUT_MS) { frame.await() } != null) {
             ProbeResult(ProbeOutcome.WORKS)
@@ -121,10 +131,11 @@ suspend fun probeCamera(context: Context, id: String): ProbeResult {
             ProbeResult(ProbeOutcome.NO_FRAME)
         }
     } catch (e: CameraAccessException) {
-        return ProbeResult(accessOutcome(e.reason), e.message.orEmpty())
+        return ProbeResult(accessOutcome(e.reason), "reason ${e.reason}")
     } catch (e: IllegalStateException) {
         return ProbeResult(ProbeOutcome.FAILED, e.message.orEmpty())
     } finally {
+        onStage(ProbeStage.CLOSING)
         device?.close()
         reader.close()
         thread.quitSafely()

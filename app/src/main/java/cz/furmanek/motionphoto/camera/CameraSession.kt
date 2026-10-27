@@ -81,11 +81,13 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.atan
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -102,6 +104,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class SessionStatus { CLOSED, OPENING, READY, ERROR }
 
@@ -398,22 +401,52 @@ class CameraSession(
     /**
      * Tries each of [ids] (cameras the phone hides from its list) directly: lets go of the bound camera first so
      * the phone does not report it busy, and binds again afterwards. Null when a capture or recording runs.
+     * Each probe runs off the main thread and is given up after [PROBE_LIMIT_MS], so a camera call that never
+     * returns cannot hold the app; [onStage] reports each step on the main thread.
      */
-    suspend fun probeHiddenCameras(ids: List<String>): Map<String, ProbeResult>? {
+    suspend fun probeHiddenCameras(ids: List<String>, onStage: (String, ProbeStage) -> Unit): Map<String, ProbeResult>? {
         if (isLocked()) return null
         bindJob?.cancel()
         stopPortraitPreview()
         stopPreRoll()
+        val closing = camera
         provider?.unbindAll()
         camera = null
         boundKey = null
         _state.update { it.copy(status = SessionStatus.OPENING) }
+        // CameraX closes the camera asynchronously; opening another one before that reads as busy.
+        withTimeoutOrNull(CAMERA_CLOSE_WAIT_MS) {
+            closing?.cameraInfo?.cameraState?.asFlow()?.first { it.type == CameraState.Type.CLOSED }
+        }
         return try {
-            ids.associateWith { id -> probeCamera(app, id).also { Log.i(TAG, "Hidden camera $id: $it") } }
+            ids.associateWith { id -> probeWithRetry(id, onStage) }
         } finally {
             requestBind()
         }
     }
+
+    /** One probe of [id], and once more after a pause if the phone said busy (a camera still closing). */
+    private suspend fun probeWithRetry(id: String, onStage: (String, ProbeStage) -> Unit): ProbeResult {
+        val first = probeOnce(id, onStage)
+        if (first.outcome != ProbeOutcome.BUSY) return first
+        delay(PROBE_RETRY_DELAY_MS)
+        return probeOnce(id, onStage)
+    }
+
+    private suspend fun probeOnce(id: String, onStage: (String, ProbeStage) -> Unit): ProbeResult {
+        var stage = ProbeStage.OPENING
+        // Not a child: a stuck camera call must not keep this from returning.
+        val probe = probeScope.async {
+            probeCamera(app, id) { next ->
+                stage = next
+                scope.launch { onStage(id, next) }
+            }
+        }
+        val result = withTimeoutOrNull(PROBE_LIMIT_MS) { probe.await() } ?: ProbeResult(ProbeOutcome.STUCK, stage.name)
+        return result.also { Log.i(TAG, "Hidden camera $id: $it") }
+    }
+
+    private val probeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Turns Macro on or off; it takes effect in the back camera's Photo mode. */
     fun setMacro(on: Boolean) {
@@ -1491,6 +1524,9 @@ class CameraSession(
         const val TAG = "CameraSession"
         const val FOCUS_AUTO_CANCEL_SECONDS = 3L
         const val FPS_60 = 60
+        const val PROBE_LIMIT_MS = 15_000L
+        const val CAMERA_CLOSE_WAIT_MS = 3_000L
+        const val PROBE_RETRY_DELAY_MS = 1_500L
         const val COUNTDOWN_STEP_MS = 1_000L
         const val TIMELAPSE_CLOCK_MS = 500L
         const val EVENT_BUFFER = 64

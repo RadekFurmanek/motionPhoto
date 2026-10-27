@@ -27,10 +27,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -42,6 +38,7 @@ import cz.furmanek.motionphoto.camera.LensInfo
 import cz.furmanek.motionphoto.camera.MacroSetup
 import cz.furmanek.motionphoto.camera.ProbeOutcome
 import cz.furmanek.motionphoto.camera.ProbeResult
+import cz.furmanek.motionphoto.camera.ProbeStage
 import cz.furmanek.motionphoto.camera.minFocusCm
 import cz.furmanek.motionphoto.camera.resolveVideoQuality
 import cz.furmanek.motionphoto.camera.usesCustomPortrait
@@ -58,6 +55,8 @@ fun SettingsScreen(
     shutterSoundMandatory: Boolean,
     onUpdate: ((CameraSettings) -> CameraSettings) -> Unit,
     hiddenProbe: Map<String, ProbeResult>?,
+    probeStages: Map<String, ProbeStage>,
+    probing: Boolean,
     onProbeHidden: (List<String>) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -214,18 +213,14 @@ fun SettingsScreen(
                     null -> Unit
                 }
                 capabilities.lenses.forEach { lens ->
-                    val probe = hiddenProbe?.get(lens.cameraId)?.takeIf { lens.hidden }
-                    InfoRow(lensDescription(lens) + (probe?.let { " · " + probeDescription(it) } ?: ""))
+                    val probe = hiddenProbe?.get(lens.cameraId)?.let { probeDescription(it) }
+                        ?: probeStages[lens.cameraId]?.let { stageDescription(it) }
+                    InfoRow(lensDescription(lens) + (probe?.takeIf { lens.hidden }?.let { " · $it" } ?: ""))
                 }
                 val hiddenIds = capabilities.lenses.filter { it.hidden }.map { it.cameraId }
                 if (hiddenIds.isNotEmpty()) {
-                    // Cleared when the results arrive (or the session refuses because a capture runs).
-                    var probing by remember(hiddenProbe) { mutableStateOf(false) }
                     OutlinedButton(
-                        onClick = {
-                            probing = true
-                            onProbeHidden(hiddenIds)
-                        },
+                        onClick = { onProbeHidden(hiddenIds) },
                         enabled = !probing,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     ) {
@@ -251,11 +246,25 @@ private fun lensDescription(lens: LensInfo): String {
 @Composable
 private fun probeDescription(result: ProbeResult): String = when (result.outcome) {
     ProbeOutcome.WORKS -> stringResource(R.string.probe_works)
-    ProbeOutcome.BLOCKED -> stringResource(R.string.probe_blocked)
-    ProbeOutcome.BUSY -> stringResource(R.string.probe_busy)
+    ProbeOutcome.BLOCKED -> stringResource(R.string.probe_blocked) + result.detail.takeIf { it.isNotEmpty() }?.let { " ($it)" }.orEmpty()
+    ProbeOutcome.BUSY -> stringResource(R.string.probe_busy) + result.detail.takeIf { it.isNotEmpty() }?.let { " ($it)" }.orEmpty()
     ProbeOutcome.NO_FRAME -> stringResource(R.string.probe_no_frame)
     ProbeOutcome.FAILED -> stringResource(R.string.probe_failed, result.detail)
+    ProbeOutcome.STUCK -> stringResource(
+        R.string.probe_stuck,
+        ProbeStage.entries.firstOrNull { it.name == result.detail }?.let { stageDescription(it) } ?: result.detail,
+    )
 }
+
+@Composable
+private fun stageDescription(stage: ProbeStage): String = stringResource(
+    when (stage) {
+        ProbeStage.OPENING -> R.string.probe_stage_opening
+        ProbeStage.CONFIGURING -> R.string.probe_stage_configuring
+        ProbeStage.WAITING_FRAME -> R.string.probe_stage_frame
+        ProbeStage.CLOSING -> R.string.probe_stage_closing
+    },
+)
 
 @Composable
 private fun InfoRow(text: String) {

@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import cz.furmanek.motionphoto.MotionPhotoApp
 import cz.furmanek.motionphoto.camera.ProbeOutcome
 import cz.furmanek.motionphoto.camera.ProbeResult
+import cz.furmanek.motionphoto.camera.ProbeStage
 import cz.furmanek.motionphoto.camera.SessionEvent
 import cz.furmanek.motionphoto.camera.SessionState
 import cz.furmanek.motionphoto.panorama.Attitude
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /** Translates UI actions to the app-wide [cz.furmanek.motionphoto.camera.CameraSession] and settings. */
@@ -92,11 +94,27 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     /** Results of trying the hidden cameras, by id; null until tried. */
     val hiddenProbe: StateFlow<Map<String, ProbeResult>?> = _hiddenProbe.asStateFlow()
 
+    private val _probeStages = MutableStateFlow<Map<String, ProbeStage>>(emptyMap())
+
+    /** The step each hidden camera's probe is in, while it runs. */
+    val probeStages: StateFlow<Map<String, ProbeStage>> = _probeStages.asStateFlow()
+
+    private val _probing = MutableStateFlow(false)
+    val probing: StateFlow<Boolean> = _probing.asStateFlow()
+
     fun probeHiddenCameras(ids: List<String>) {
+        if (_probing.value) return
+        _probing.value = true
+        _hiddenProbe.value = null
+        _probeStages.value = emptyMap()
         viewModelScope.launch {
-            // While a capture runs the camera stays put; that reads as busy.
-            _hiddenProbe.value = session.probeHiddenCameras(ids)
-                ?: ids.associateWith { ProbeResult(ProbeOutcome.BUSY) }
+            try {
+                // While a capture runs the camera stays put; that reads as busy.
+                _hiddenProbe.value = session.probeHiddenCameras(ids) { id, stage -> _probeStages.update { it + (id to stage) } }
+                    ?: ids.associateWith { ProbeResult(ProbeOutcome.BUSY) }
+            } finally {
+                _probing.value = false
+            }
         }
     }
 
