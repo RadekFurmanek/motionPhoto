@@ -58,6 +58,41 @@ fun maskAt(mask: FloatArray, maskWidth: Int, maskHeight: Int, x: Float, y: Float
 }
 
 /**
+ * Maps pixel [p] of a side with [scale] = maskSize / photoSize to mask coordinates, where pixel centres
+ * sit at integers (as [maskAt] and [argbAt] expect).
+ */
+fun toMaskCoordinate(p: Int, scale: Float): Float = (p + 0.5f) * scale - 0.5f
+
+/**
+ * Bilinear colour of a [width] x [height] ARGB image at ([x], [y]) in its pixels; clamped to the edge outside.
+ * The result is opaque. Allocation-free, as it runs once per pixel of a full photo.
+ */
+fun argbAt(pixels: IntArray, width: Int, height: Int, x: Float, y: Float): Int {
+    val cx = x.coerceIn(0f, width - 1f)
+    val cy = y.coerceIn(0f, height - 1f)
+    val x0 = cx.toInt()
+    val y0 = cy.toInt()
+    val x1 = (x0 + 1).coerceAtMost(width - 1)
+    val y1 = (y0 + 1).coerceAtMost(height - 1)
+    val fx = cx - x0
+    val fy = cy - y0
+    val p00 = pixels[y0 * width + x0]
+    val p10 = pixels[y0 * width + x1]
+    val p01 = pixels[y1 * width + x0]
+    val p11 = pixels[y1 * width + x1]
+    val r = bilinearChannel(p00, p10, p01, p11, 16, fx, fy)
+    val g = bilinearChannel(p00, p10, p01, p11, 8, fx, fy)
+    val b = bilinearChannel(p00, p10, p01, p11, 0, fx, fy)
+    return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+}
+
+private fun bilinearChannel(p00: Int, p10: Int, p01: Int, p11: Int, shift: Int, fx: Float, fy: Float): Int {
+    val top = (p00 ushr shift and 0xFF) * (1 - fx) + (p10 ushr shift and 0xFF) * fx
+    val bottom = (p01 ushr shift and 0xFF) * (1 - fx) + (p11 ushr shift and 0xFF) * fx
+    return (top * (1 - fy) + bottom * fy).roundToInt().coerceIn(0, 255)
+}
+
+/**
  * Blur planes hold values as fixed point with this many fraction bits, so box sums are exact:
  * a flat area stays flat and an empty one stays empty, with no float drift in the running sum.
  */

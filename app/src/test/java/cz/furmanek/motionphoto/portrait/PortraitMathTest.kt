@@ -87,4 +87,28 @@ class PortraitMathTest {
     @Test
     fun `a mask is clamped to its edge outside the frame`() =
         assertEquals(0f, maskAt(floatArrayOf(0f, 1f), 2, 1, -3f, 5f), 0f)
+
+    @Test
+    fun `a photo pixel centre maps onto the matching mask pixel centre`() {
+        // 4000 px photo, 1000 px mask: photo pixels 0..3 cover mask pixel 0, whose centre lies between 1 and 2.
+        assertEquals(-0.375f, toMaskCoordinate(0, 0.25f), 1e-6f)
+        assertEquals(0f, (toMaskCoordinate(1, 0.25f) + toMaskCoordinate(2, 0.25f)) / 2, 1e-6f)
+        assertEquals(999.375f, toMaskCoordinate(3999, 0.25f), 1e-3f)
+    }
+
+    @Test
+    fun `equal sizes map pixels onto themselves`() = assertEquals(7f, toMaskCoordinate(7, 1f), 1e-6f)
+
+    @Test
+    fun `argb sampling interpolates each channel and is opaque`() {
+        val pixels = intArrayOf(0x00000000, 0x00FF8040)
+        assertEquals(0xFF804020.toInt(), argbAt(pixels, 2, 1, 0.5f, 0f))
+    }
+
+    @Test
+    fun `argb sampling clamps to the edge`() {
+        val pixels = intArrayOf(0xFF102030.toInt(), 0xFF405060.toInt(), 0xFF708090.toInt(), 0xFFA0B0C0.toInt())
+        assertEquals(0xFF102030.toInt(), argbAt(pixels, 2, 2, -3f, -0.4f))
+        assertEquals(0xFFA0B0C0.toInt(), argbAt(pixels, 2, 2, 5f, 1.6f))
+    }
 }
