@@ -51,6 +51,9 @@ import cz.furmanek.motionphoto.panorama.PanoramaStatus
 import cz.furmanek.motionphoto.panorama.focalLengthPx
 import cz.furmanek.motionphoto.panorama.stitchPanorama
 import cz.furmanek.motionphoto.panorama.toJpeg
+import cz.furmanek.motionphoto.portrait.MlKitSubjectMasker
+import cz.furmanek.motionphoto.portrait.PortraitOutcome
+import cz.furmanek.motionphoto.portrait.PortraitProcessor
 import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.FlashSetting
@@ -185,6 +188,13 @@ class CameraSession(
     private var timelapseClock: Job? = null
     private val panoramaCapture = PanoramaCapture(app)
     private var panoramaJob: Job? = null
+
+    // Lives as long as the session, which is the app process; there is no point at which to close it.
+    private val subjectMasker = MlKitSubjectMasker(app)
+    private val portraitProcessor = PortraitProcessor(subjectMasker)
+
+    /** The bound Portrait mode is the app's own (no maker bokeh): photos are processed before saving. */
+    private var customPortraitBound = false
     private var target: PreviewTarget? = null
     private var boundKey: BindingKey? = null
     private var bindJob: Job? = null
@@ -379,9 +389,11 @@ class CameraSession(
                     delay(COUNTDOWN_STEP_MS)
                 }
                 _state.update { it.copy(countdown = null) }
-                val saved = shoot(imageCapture)
-                _state.update { it.copy(lastCapture = saved.uri) }
-                _events.tryEmit(SessionEvent.Saved(saved))
+                val shot = shoot(imageCapture)
+                _state.update { it.copy(lastCapture = shot.media.uri) }
+                _events.tryEmit(SessionEvent.Saved(shot.media))
+                // After Saved: the screen shows the latest event, and this one explains what was saved.
+                shot.problem?.let { _events.tryEmit(SessionEvent.CaptureFailed(it)) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -395,7 +407,10 @@ class CameraSession(
         }
     }
 
-    private suspend fun shoot(imageCapture: ImageCapture): SavedMedia = coroutineScope {
+    /** A saved shot; [problem] says why it came out plainer than asked (a custom portrait that did not work). */
+    private class Shot(val media: SavedMedia, val problem: String? = null)
+
+    private suspend fun shoot(imageCapture: ImageCapture): Shot = coroutineScope {
         val capturedAt = System.currentTimeMillis()
         val location = async {
             if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
@@ -403,10 +418,18 @@ class CameraSession(
         playSound(MediaActionSound.SHUTTER_CLICK)
         val mirrored = settings.mirrorFrontCamera && _state.value.lensFacing == LENS_FACING_FRONT
         val videoCapture = videoCapture
-        if (settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && videoCapture != null) {
-            photoCapture.captureMotionPhoto(imageCapture, videoCapture, capturedAt, mirrored, location)
-        } else {
-            photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location)
+        when {
+            settings.mode == CaptureMode.PORTRAIT && customPortraitBound -> {
+                val resolution = settings.portraitResolution
+                var outcome = PortraitOutcome.FAILED
+                val media = photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location) { file ->
+                    outcome = portraitProcessor.process(file, resolution)
+                }
+                Shot(media, portraitProblem(outcome)?.let(app::getString))
+            }
+            settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && videoCapture != null ->
+                Shot(photoCapture.captureMotionPhoto(imageCapture, videoCapture, capturedAt, mirrored, location))
+            else -> Shot(photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location))
         }
     }
 
@@ -777,7 +800,14 @@ class CameraSession(
         }
         val cameraInfo = provider.getCameraInfo(selector)
         val extensions = extensions(provider)
-        val capabilities = CapabilityProbe.probe(provider, cameraInfo, selector, extensions, panoramaCapture.available)
+        val capabilities = CapabilityProbe.probe(
+            provider,
+            cameraInfo,
+            selector,
+            extensions,
+            hasRotationVector = panoramaCapture.available,
+            customPortrait = subjectMasker.available,
+        )
         val lensFacing = cameraInfo.lensFacing
 
         // A stored mode or HDR this camera cannot do (other phone, front camera) is dropped; the settings
@@ -792,8 +822,10 @@ class CameraSession(
             bindSlowMotion(key, target, provider, selector, cameraInfo, capabilities)
             return
         }
+        val customPortrait = usesCustomPortrait(key.mode, capabilities)
+        if (customPortrait) startPortraitModelDownload()
         val extensionMode = when {
-            key.mode == CaptureMode.PORTRAIT -> ExtensionMode.BOKEH
+            key.mode == CaptureMode.PORTRAIT && !customPortrait -> ExtensionMode.BOKEH
             key.mode == CaptureMode.NIGHT -> ExtensionMode.NIGHT
             key.mode == CaptureMode.PHOTO && key.hdr -> ExtensionMode.HDR
             else -> null
@@ -820,7 +852,7 @@ class CameraSession(
 
         var lastError: RuntimeException? = null
         val wantsVideoExtras = key.videoFps60 || key.videoStabilization
-        val attempts = bindingAttempts(key.mode, key.livePhoto, wantsVideoExtras)
+        val attempts = bindingAttempts(key.mode, key.livePhoto, wantsVideoExtras, customPortrait)
         for ((index, attempt) in attempts.withIndex()) {
             val kinds = attempt.kinds
             val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect)).build()
@@ -831,9 +863,9 @@ class CameraSession(
             val imageCapture = if (UseCaseKind.IMAGE in kinds) {
                 ImageCapture.Builder()
                     // Minimal shutter lag keeps a live photo's still close to its stamped moment in the clip;
-                    // the maker's processing (portrait, night, HDR) is about quality instead.
+                    // portrait (the maker's or ours), night and HDR are about quality instead.
                     .setCaptureMode(
-                        if (extensionMode == null) {
+                        if (extensionMode == null && !customPortrait) {
                             ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                         } else {
                             ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
@@ -890,6 +922,7 @@ class CameraSession(
             // A live photo that had to drop its video stream is not available on this camera.
             val livePhotoAvailable = !(key.mode == CaptureMode.PHOTO && key.livePhoto && index > 0)
             this.imageAnalysis = imageAnalysis
+            customPortraitBound = customPortrait
             onBound(key, bound, preview, imageCapture, videoCapture, capabilities, lensFacing, livePhotoAvailable)
             return
         }
@@ -945,6 +978,7 @@ class CameraSession(
             return
         }
         imageAnalysis = null
+        customPortraitBound = false
         onBound(key, bound, preview, null, videoCapture, capabilities, cameraInfo.lensFacing, livePhotoAvailable = true)
     }
 
@@ -983,6 +1017,19 @@ class CameraSession(
                     else -> true
                 },
             )
+        }
+    }
+
+    /** Fire and forget: without the segmentation model a portrait is saved as an ordinary photo until it arrives. */
+    private fun startPortraitModelDownload() {
+        scope.launch {
+            try {
+                subjectMasker.ensureModel()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Requesting the portrait model failed", e)
+            }
         }
     }
 
@@ -1129,6 +1176,14 @@ class CameraSession(
         const val EVENT_BUFFER = 64
         const val ZOOM_ANIMATION_MS = 300L
         const val ZOOM_FRAME_MS = 16L
+
+        /** What to tell the user when a custom portrait came out as an ordinary photo; null for a portrait. */
+        fun portraitProblem(outcome: PortraitOutcome): Int? = when (outcome) {
+            PortraitOutcome.PORTRAIT -> null
+            PortraitOutcome.NO_SUBJECT -> R.string.portrait_no_subject
+            PortraitOutcome.MODEL_MISSING -> R.string.portrait_model_downloading
+            PortraitOutcome.OUT_OF_MEMORY, PortraitOutcome.FAILED -> R.string.portrait_failed
+        }
 
         // 1:1 is cropped from the 4:3 stream by the view port.
         fun PhotoAspect.streamAspect(): Int =

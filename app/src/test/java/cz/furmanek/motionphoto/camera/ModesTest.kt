@@ -22,6 +22,7 @@ class ModesTest {
         extensionModes: Set<Int> = emptySet(),
         hasRotationVector: Boolean = false,
         focalMm: Float = 0f,
+        customPortrait: Boolean = false,
     ) = CameraCapabilities(
         hasFlash = false,
         minZoom = 1f,
@@ -40,6 +41,7 @@ class ModesTest {
         focalMm = focalMm,
         sensorWidthMm = 5.6f,
         sensorHeightMm = 4.2f,
+        customPortrait = customPortrait,
     )
 
     private val panoramaReady = caps(hasRotationVector = true, focalMm = 4.38f)
@@ -60,6 +62,26 @@ class ModesTest {
     @Test
     fun `hdr alone adds no mode`() {
         assertEquals(listOf(TIMELAPSE, VIDEO, PHOTO), availableModes(caps(extensionModes = setOf(ExtensionMode.HDR)), LENS_FACING_BACK))
+    }
+
+    @Test
+    fun `custom portrait offers portrait without the maker's bokeh`() {
+        assertEquals(true, PORTRAIT in availableModes(caps(customPortrait = true), LENS_FACING_BACK))
+    }
+
+    @Test
+    fun `no portrait without bokeh or custom portrait`() {
+        assertEquals(false, PORTRAIT in availableModes(caps(), LENS_FACING_BACK))
+    }
+
+    @Test
+    fun `the maker's bokeh wins over custom portrait`() {
+        assertEquals(false, usesCustomPortrait(PORTRAIT, caps(extensionModes = setOf(ExtensionMode.BOKEH), customPortrait = true)))
+    }
+
+    @Test
+    fun `portrait without bokeh is the custom one`() {
+        assertEquals(true, usesCustomPortrait(PORTRAIT, caps(customPortrait = true)))
     }
 
     @Test

@@ -64,6 +64,22 @@ class BindingPlanTest {
     }
 
     @Test
+    fun `custom portrait adds frame analysis and falls back without it`() {
+        assertEquals(
+            listOf(BindingAttempt(setOf(PREVIEW, IMAGE, ANALYSIS)), BindingAttempt(setOf(PREVIEW, IMAGE))),
+            bindingAttempts(CaptureMode.PORTRAIT, livePhoto = true, videoExtras = false, customPortrait = true),
+        )
+    }
+
+    @Test
+    fun `maker portrait binds preview and still capture only`() {
+        assertEquals(
+            listOf(BindingAttempt(setOf(PREVIEW, IMAGE))),
+            bindingAttempts(CaptureMode.PORTRAIT, livePhoto = true, videoExtras = false, customPortrait = false),
+        )
+    }
+
+    @Test
     fun `timelapse binds preview and frame analysis`() {
         assertEquals(
             listOf(BindingAttempt(setOf(PREVIEW, ANALYSIS))),

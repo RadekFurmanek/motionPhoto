@@ -90,11 +90,10 @@
     <string name="panorama_progress">Snímky: %1$d · %2$d°</string>
     <string name="panorama_start">Spustit panorama</string>
     <string name="panorama_stop">Dokončit panorama</string>
-    <!-- The portrait strings are wired up by the capture flow and settings; drop tools:ignore once they are used. -->
-    <string name="portrait_no_subject" tools:ignore="UnusedResources">Portrét se nepovedl, nic jsem nenašel – uložena běžná fotka</string>
-    <string name="portrait_model_downloading" tools:ignore="UnusedResources">Portrét se připravuje (stahuje se model) – uložena běžná fotka</string>
-    <string name="portrait_failed" tools:ignore="UnusedResources">Portrét se nepovedl – uložena běžná fotka</string>
-    <string name="settings_portrait_resolution" tools:ignore="UnusedResources">Rozlišení portrétu</string>
-    <string name="portrait_resolution_full" tools:ignore="UnusedResources">Plné</string>
-    <string name="portrait_resolution_standard" tools:ignore="UnusedResources">Standardní (12 Mpx)</string>
+    <string name="portrait_no_subject">Portrét se nepovedl, nic jsem nenašel – uložena běžná fotka</string>
+    <string name="portrait_model_downloading">Portrét se připravuje (stahuje se model) – uložena běžná fotka</string>
+    <string name="portrait_failed">Portrét se nepovedl – uložena běžná fotka</string>
+    <string name="settings_portrait_resolution">Rozlišení portrétu</string>
+    <string name="portrait_resolution_full">Plné</string>
+    <string name="portrait_resolution_standard">Standardní (12 Mpx)</string>
 </resources>

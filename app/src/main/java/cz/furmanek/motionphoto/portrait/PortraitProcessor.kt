@@ -17,6 +17,9 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+/** Prefix of the processor's temp files, which sit next to the photo being processed. */
+const val PORTRAIT_TEMP_PREFIX = "portrait_"
+
 enum class PortraitOutcome { PORTRAIT, NO_SUBJECT, MODEL_MISSING, OUT_OF_MEMORY, FAILED }
 
 /** Blurs the background of a photo behind the subject that [masker] finds. */
@@ -152,7 +155,7 @@ class PortraitProcessor(private val masker: SubjectMasker) {
 
     private companion object {
         const val TAG = "PortraitProcessor"
-        const val TEMP_PREFIX = "portrait_"
+        const val TEMP_PREFIX = PORTRAIT_TEMP_PREFIX
         const val MASK_MAX_SIDE = 1024
         const val STRIP_ROWS = 64
         const val JPEG_QUALITY = 95

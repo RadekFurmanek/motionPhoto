@@ -34,7 +34,10 @@ import androidx.compose.ui.unit.dp
 import cz.furmanek.motionphoto.R
 import cz.furmanek.motionphoto.camera.CameraCapabilities
 import cz.furmanek.motionphoto.camera.resolveVideoQuality
+import cz.furmanek.motionphoto.camera.usesCustomPortrait
 import cz.furmanek.motionphoto.settings.CameraSettings
+import cz.furmanek.motionphoto.settings.CaptureMode
+import cz.furmanek.motionphoto.settings.PortraitResolution
 import cz.furmanek.motionphoto.ui.components.labelRes
 
 @Composable
@@ -100,6 +103,34 @@ fun SettingsScreen(
                 checked = settings.mirrorFrontCamera,
             ) { checked ->
                 onUpdate { it.copy(mirrorFrontCamera = checked) }
+            }
+            // Only the app's own portrait has a size to choose; the maker's comes out as the maker makes it.
+            if (capabilities != null && usesCustomPortrait(CaptureMode.PORTRAIT, capabilities)) {
+                Text(
+                    stringResource(R.string.settings_portrait_resolution),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    PortraitResolution.entries.forEach { resolution ->
+                        FilterChip(
+                            selected = settings.portraitResolution == resolution,
+                            onClick = { onUpdate { it.copy(portraitResolution = resolution) } },
+                            label = {
+                                Text(
+                                    stringResource(
+                                        when (resolution) {
+                                            PortraitResolution.FULL -> R.string.portrait_resolution_full
+                                            PortraitResolution.STANDARD -> R.string.portrait_resolution_standard
+                                        },
+                                    ),
+                                )
+                            },
+                        )
+                    }
+                }
             }
 
             val qualities = capabilities?.videoQualities.orEmpty()

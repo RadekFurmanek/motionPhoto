@@ -375,7 +375,7 @@ private fun BottomControls(
                 isRecording = recording != null || panorama?.capturing == true,
                 showClipProgress = state.busy && state.countdown == null && settings.mode == CaptureMode.PHOTO &&
                     settings.effectiveLivePhoto() && state.livePhotoAvailable,
-                // The maker's portrait, night and HDR processing can take seconds.
+                // Portrait (the maker's or ours), night and HDR processing can take seconds.
                 processing = state.busy && state.countdown == null &&
                     (settings.mode == CaptureMode.PORTRAIT || settings.mode == CaptureMode.NIGHT || settings.hdr),
                 // During the self-timer the shutter cancels the countdown; a panorama being stitched cannot be stopped.
