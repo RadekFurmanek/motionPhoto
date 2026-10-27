@@ -709,7 +709,7 @@ class CameraSession(
                 val location = async {
                     if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
                 }
-                val jpeg = withContext(Dispatchers.Default) {
+                val (panorama, jpeg) = withContext(Dispatchers.Default) {
                     val focalPx = focalLengthPx(optics.focalMm, optics.sensorMm, frames.first().width)
                     // The focal length is the first one the lens lists; this lets a phone test check it.
                     Log.i(
@@ -717,14 +717,22 @@ class CameraSession(
                         "Panorama optics: focalMm=${optics.focalMm} sensorMm=${optics.sensorMm} fovDeg=${optics.fovDeg} " +
                             "stepDeg=${optics.stepDeg} focalPx=$focalPx",
                     )
-                    stitchPanorama(frames, focalPx) { progress ->
+                    val onProgress = { progress: Float ->
                         _state.update { it.copy(panorama = it.panorama?.copy(stitchingProgress = progress)) }
-                    }.image.toJpeg(PANORAMA_JPEG_QUALITY)
+                    }
+                    val stitched = try {
+                        stitchPanorama(frames, focalPx, onProgress = onProgress)
+                    } catch (_: OutOfMemoryError) {
+                        // A wide turn on a small heap: a smaller panorama beats none.
+                        Log.w(TAG, "Stitching the panorama ran out of memory; retrying smaller")
+                        stitchPanorama(frames, focalPx, PANORAMA_RETRY_SCALE, onProgress)
+                    }
+                    stitched to stitched.image.toJpeg(PANORAMA_JPEG_QUALITY)
                 }
                 val savedLocation = location.await()
                 // Once writing starts it completes, so a late cancel cannot leave a half-written entry.
                 val uri = withContext(NonCancellable + Dispatchers.IO) {
-                    writer.savePanorama(jpeg, optics.startedAtMillis, savedLocation)
+                    writer.savePanorama(jpeg, panorama, optics.startedAtMillis, savedLocation)
                 }
                 _state.update { it.copy(lastCapture = uri) }
                 _events.tryEmit(SessionEvent.Saved(SavedMedia(uri, MediaKind.PANORAMA)))
@@ -1346,7 +1354,9 @@ class CameraSession(
         fun PhotoAspect.streamAspect(): Int =
             if (this == PhotoAspect.RATIO_16_9) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
 
-        const val PANORAMA_STEPS_PER_FOV = 3
+        // Neighbours overlap by a third: enough for the seam, and fewer frames to hold and join.
+        const val PANORAMA_STEPS_PER_FOV = 1.5f
+        const val PANORAMA_RETRY_SCALE = 0.6
         const val PANORAMA_JPEG_QUALITY = 92
 
         /**
@@ -1355,7 +1365,7 @@ class CameraSession(
          * Near 960×720 for the live portrait: it is blurred at 480 px tall.
          */
         fun analysisSize(mode: CaptureMode): android.util.Size = when (mode) {
-            CaptureMode.PANORAMA -> android.util.Size(1280, 960)
+            CaptureMode.PANORAMA -> android.util.Size(1920, 1440)
             CaptureMode.PORTRAIT -> android.util.Size(960, 720)
             else -> android.util.Size(1920, 1080)
         }

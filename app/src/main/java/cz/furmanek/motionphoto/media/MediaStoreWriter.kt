@@ -11,6 +11,7 @@ import android.provider.MediaStore
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.exifinterface.media.ExifInterface
 import cz.furmanek.motionphoto.motionphoto.MotionPhotoMuxer
+import cz.furmanek.motionphoto.panorama.Panorama
 import java.io.File
 import java.io.IOException
 import java.io.OutputStream
@@ -35,12 +36,25 @@ class MediaStoreWriter(private val resolver: ContentResolver, private val packag
     fun savePhoto(jpeg: File, capturedAtMillis: Long, location: Location?): Uri =
         saveJpegFile(MediaKind.PHOTO, jpeg, capturedAtMillis, location)
 
-    /** Saves a stitched panorama as PXL_….PANO.jpg; EXIF needs a file, so it goes through a temp file. */
-    fun savePanorama(jpeg: ByteArray, capturedAtMillis: Long, location: Location?): Uri {
+    /**
+     * Saves a stitched panorama as PXL_….PANO.jpg with GPano XMP from [panorama]. EXIF needs a file, so it goes
+     * through a temp file; the XMP is added after the EXIF write so that cannot drop it.
+     */
+    fun savePanorama(jpeg: ByteArray, panorama: Panorama, capturedAtMillis: Long, location: Location?): Uri {
         val file = File.createTempFile(TEMP_PANORAMA_PREFIX, ".jpg")
         try {
             file.writeBytes(jpeg)
-            return saveJpegFile(MediaKind.PANORAMA, file, capturedAtMillis, location)
+            location?.let { writeExifLocation(file, it) }
+            val tagged = PanoramaXmp.insert(
+                file.readBytes(),
+                width = panorama.image.width,
+                height = panorama.image.height,
+                fullWidth = panorama.fullWidth,
+                fullHeight = panorama.fullHeight,
+                left = panorama.left,
+                top = panorama.top,
+            )
+            return insertImage(MediaKind.PANORAMA, capturedAtMillis) { output -> output.write(tagged) }
         } finally {
             file.delete()
         }
