@@ -674,7 +674,7 @@ class CameraSession(
         val zoomed = camera.cameraControl.setZoomRatio(zoomRatio)
         zoomed.addListener({
             if (panoramaOptics === optics && _state.value.panorama?.capturing == true) {
-                panoramaCapture.start(analysis, stepDeg, ::onPanoramaStatus, onFinished = ::finishPanorama)
+                panoramaCapture.start(analysis, stepDeg, targetRotation, ::onPanoramaStatus, onFinished = ::finishPanorama)
             }
         }, ContextCompat.getMainExecutor(app))
     }
@@ -710,7 +710,7 @@ class CameraSession(
                     if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
                 }
                 val jpeg = withContext(Dispatchers.Default) {
-                    val focalPx = focalLengthPx(optics.focalMm, optics.sensorMm, frames.first().image.width)
+                    val focalPx = focalLengthPx(optics.focalMm, optics.sensorMm, frames.first().width)
                     // The focal length is the first one the lens lists; this lets a phone test check it.
                     Log.i(
                         TAG,
@@ -719,7 +719,7 @@ class CameraSession(
                     )
                     stitchPanorama(frames, focalPx) { progress ->
                         _state.update { it.copy(panorama = it.panorama?.copy(stitchingProgress = progress)) }
-                    }.toJpeg(PANORAMA_JPEG_QUALITY)
+                    }.image.toJpeg(PANORAMA_JPEG_QUALITY)
                 }
                 val savedLocation = location.await()
                 // Once writing starts it completes, so a late cancel cannot leave a half-written entry.

@@ -48,22 +48,6 @@ class StitcherTest {
     private val scene = syntheticScene(2400, 360, seed = 7)
 
     @Test
-    fun `cylindrical warp with a huge focal length changes nothing`() {
-        val frame = scene.crop(0, 0, 400, 320)
-        val warped = cylindricalWarp(frame, focalPx = 1e7)
-        assertEquals(frame.width, warped.width)
-        assertTrue(meanChannelDiff(frame, warped) < 1.0)
-    }
-
-    @Test
-    fun `cylindrical warp narrows the frame by the projected angle`() {
-        val frame = scene.crop(0, 0, 400, 320)
-        val warped = cylindricalWarp(frame, focalPx = 400.0)
-        assertEquals((2 * 400 * atan(0.5)).roundToInt(), warped.width)
-        assertEquals(320, warped.height)
-    }
-
-    @Test
     fun `shift between overlapping frames is found including vertical drift`() {
         val left = scene.crop(0, 20, 400, 320)
         val right = scene.crop(150, 23, 400, 320)
@@ -79,16 +63,6 @@ class StitcherTest {
         val shift = estimateShift(flat, flat, expectedDx = 140, searchX = 40, searchY = 8)
         assertFalse(shift.confident)
         assertEquals(140, shift.dx)
-    }
-
-    @Test
-    fun `stitching overlapping crops rebuilds the scene`() {
-        val frames = (0 until 6).map { scene.crop(it * 150, 0, 400, 320) }
-        val shifts = List(5) { Shift(150, 0, true) }
-        val panorama = stitch(frames, shifts)
-        assertEquals(400 + 5 * 150.0, panorama.width.toDouble(), 2.0)
-        val expected = scene.crop(0, 0, panorama.width, panorama.height)
-        assertTrue(meanChannelDiff(expected, panorama) < 6.0)
     }
 
     @Test

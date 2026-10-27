@@ -19,8 +19,11 @@ class PanoramaSensor(context: Context) {
 
     val available: Boolean get() = sensor != null
 
-    /** [onReading] gets heading and tilt in degrees on the main thread, about 60 times a second. */
-    fun start(onReading: (yawDeg: Float, pitchDeg: Float) -> Unit) {
+    /**
+     * [onReading] gets heading and tilt in degrees and the device-to-world rotation matrix (reused between calls:
+     * copy it to keep it) on the main thread, about 60 times a second.
+     */
+    fun start(onReading: (yawDeg: Float, pitchDeg: Float, rotation: FloatArray) -> Unit) {
         val sensor = sensor ?: return
         stop()
         val rotation = FloatArray(9)
@@ -32,7 +35,11 @@ class PanoramaSensor(context: Context) {
                 // Upright phone, camera looking forward: measure around the axis through the screen's top.
                 SensorManager.remapCoordinateSystem(rotation, SensorManager.AXIS_X, SensorManager.AXIS_Z, remapped)
                 SensorManager.getOrientation(remapped, orientation)
-                onReading(Math.toDegrees(orientation[0].toDouble()).toFloat(), Math.toDegrees(orientation[1].toDouble()).toFloat())
+                onReading(
+                    Math.toDegrees(orientation[0].toDouble()).toFloat(),
+                    Math.toDegrees(orientation[1].toDouble()).toFloat(),
+                    rotation,
+                )
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
