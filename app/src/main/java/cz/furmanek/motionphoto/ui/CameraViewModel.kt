@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import cz.furmanek.motionphoto.MotionPhotoApp
 import cz.furmanek.motionphoto.camera.SessionEvent
 import cz.furmanek.motionphoto.camera.SessionState
+import cz.furmanek.motionphoto.panorama.Attitude
 import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
@@ -33,6 +34,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     /** The live portrait's blurred background over the preview; null shows the preview alone. */
     val portraitFrame: Flow<ImageBitmap?> = session.portraitFrame
+    val panoramaAttitude: StateFlow<Attitude?> = session.panoramaAttitude
 
     /** The custom portrait's background blur, a fraction of the longer side. */
     val portraitBlur: StateFlow<Float> = session.portraitBlur

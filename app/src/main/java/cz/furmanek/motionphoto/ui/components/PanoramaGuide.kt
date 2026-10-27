@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -21,50 +22,90 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cz.furmanek.motionphoto.R
 import cz.furmanek.motionphoto.camera.PanoramaUiState
+import cz.furmanek.motionphoto.panorama.Attitude
+import cz.furmanek.motionphoto.panorama.levelErrorDeg
+import kotlinx.coroutines.flow.Flow
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private val GuideRed = Color(0xFFE53935)
 private val TargetYellow = Color(0xFFFFD54F)
 
-/** How far the target sits from the middle per degree still to turn; it reaches the middle as a frame is due. */
+/** The level line's colour while the phone is held straight. */
+internal val LevelYellow = TargetYellow
+
+/** Sideways roll still counted as straight, in degrees. */
+private const val LEVEL_TOLERANCE_DEG = 2f
+
+/** How far the target sits from the middle per degree still to turn (or tilted); it reaches the middle as a frame is due. */
 private val TARGET_DP_PER_DEGREE = 6.dp
 
 /**
- * The panorama guide in the middle of the preview: a level line, a fixed aiming ring in the middle and the target
- * dot, [PanoramaUiState.yawToNextDeg] away in the direction of the sweep. Aiming the middle ring onto the target
- * dot takes the next frame. Below it the frames taken and the degrees swept; the line, the middle ring and a hint
- * turn red while the phone is tilted.
+ * The panorama's level and aim, drawn while Panorama mode is on screen: a horizon line turned against the phone's
+ * sideways roll, yellow while the phone is straight. While [panorama] captures, also a fixed aiming ring in the
+ * middle (red while the phone tilts too far) and the target dot: [PanoramaUiState.yawToNextDeg] away in the
+ * direction of the sweep, and as far below or above the middle as the phone has tilted up or down since the start.
+ * Aiming the ring onto the dot takes the next frame. Collected here, so the sensor (about 60 readings a second)
+ * recomposes only this layer.
+ */
+@Composable
+fun PanoramaLevel(attitudes: Flow<Attitude?>, panorama: PanoramaUiState?, modifier: Modifier = Modifier) {
+    val attitude by attitudes.collectAsStateWithLifecycle(initialValue = null)
+    Canvas(modifier.fillMaxSize()) {
+        val current = attitude
+        val ringRadius = 22.dp.toPx()
+        val roll = current?.rollDeg ?: 0f
+        val lineColor = if (current == null) Color.White else levelLineColor(roll)
+        rotate(-roll, center) {
+            // Longer than the screen, so the turned line still reaches both edges.
+            drawLine(
+                color = lineColor.copy(alpha = 0.8f),
+                start = Offset(center.x - size.maxDimension, center.y),
+                end = Offset(center.x + size.maxDimension, center.y),
+                strokeWidth = 2.dp.toPx(),
+            )
+        }
+        val capturing = panorama?.takeIf { it.capturing } ?: return@Canvas
+        drawCircle(
+            color = if (capturing.level) Color.White else GuideRed,
+            radius = ringRadius,
+            center = center,
+            style = Stroke(width = 2.dp.toPx()),
+        )
+        val dx = targetOffsetPx(
+            yawToNextDeg = capturing.yawToNextDeg,
+            direction = capturing.direction,
+            pxPerDegree = TARGET_DP_PER_DEGREE.toPx(),
+            maxOffsetPx = size.width / 2 - ringRadius * 2,
+        )
+        val startPitch = capturing.startPitchDeg
+        val dy = if (current != null && startPitch != null) {
+            targetVerticalOffsetPx(
+                pitchDeg = current.pitchDeg,
+                startPitchDeg = startPitch,
+                pxPerDegree = TARGET_DP_PER_DEGREE.toPx(),
+                maxOffsetPx = size.height / 2 - ringRadius * 2,
+            )
+        } else {
+            0f
+        }
+        drawCircle(color = TargetYellow, radius = ringRadius * 0.6f, center = Offset(center.x + dx, center.y + dy))
+    }
+}
+
+/**
+ * The panorama's progress below the middle: the frames taken and the degrees swept, and a hint while the phone
+ * tilts too far.
  */
 @Composable
 fun PanoramaGuide(panorama: PanoramaUiState, modifier: Modifier = Modifier) {
-    val lineColor = if (panorama.level) Color.White else GuideRed
     Box(modifier.fillMaxSize()) {
-        Canvas(Modifier.fillMaxSize()) {
-            val centerY = size.height / 2
-            val ringRadius = 22.dp.toPx()
-            drawLine(
-                color = lineColor.copy(alpha = 0.8f),
-                start = Offset(0f, centerY),
-                end = Offset(size.width, centerY),
-                strokeWidth = 2.dp.toPx(),
-            )
-            drawCircle(color = lineColor, radius = ringRadius, center = center, style = Stroke(width = 2.dp.toPx()))
-            val offset = targetOffsetPx(
-                yawToNextDeg = panorama.yawToNextDeg,
-                direction = panorama.direction,
-                pxPerDegree = TARGET_DP_PER_DEGREE.toPx(),
-                maxOffsetPx = size.width / 2 - ringRadius * 2,
-            )
-            drawCircle(
-                color = TargetYellow,
-                radius = ringRadius * 0.6f,
-                center = Offset(center.x + offset, centerY),
-            )
-        }
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
@@ -92,6 +133,19 @@ fun PanoramaGuide(panorama: PanoramaUiState, modifier: Modifier = Modifier) {
             )
         }
     }
+}
+
+/** Yellow while [rollDeg] is within [LEVEL_TOLERANCE_DEG] of an upright or sideways hold, white otherwise. */
+internal fun levelLineColor(rollDeg: Float): Color =
+    if (abs(levelErrorDeg(rollDeg)) <= LEVEL_TOLERANCE_DEG) LevelYellow else Color.White
+
+/**
+ * Vertical offset of the target dot from the middle, downward positive: the target stays at the height the
+ * panorama started at, so tilting up by [pitchDeg] − [startPitchDeg] moves it down. Capped at [maxOffsetPx].
+ */
+internal fun targetVerticalOffsetPx(pitchDeg: Float, startPitchDeg: Float, pxPerDegree: Float, maxOffsetPx: Float): Float {
+    val limit = maxOffsetPx.coerceAtLeast(0f)
+    return ((pitchDeg - startPitchDeg) * pxPerDegree).coerceIn(-limit, limit)
 }
 
 /**

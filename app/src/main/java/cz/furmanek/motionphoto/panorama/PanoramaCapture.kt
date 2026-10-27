@@ -2,6 +2,7 @@ package cz.furmanek.motionphoto.panorama
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -11,13 +12,14 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** One kept frame: upright, at most 960 px tall, with the compass heading it was taken at. */
-class PanoramaFrame(val image: Raster, val yawDeg: Float)
+/**
+ * One kept frame: upright, as JPEG (a 360° turn would not fit in memory as pixels), with the device-to-world
+ * [rotation] it was taken at and the [surfaceRotation] it was turned upright for.
+ */
+class PanoramaFrame(val jpeg: ByteArray, val width: Int, val rotation: FloatArray, val surfaceRotation: Int)
 
 /** What the capture shows while it runs. [frames] counts the frames kept so far; [direction] as in [PanoramaProgress]. */
 data class PanoramaStatus(val frames: Int, val sweptDeg: Float, val level: Boolean, val yawToNextDeg: Float, val direction: Int)
@@ -36,7 +38,7 @@ class PanoramaCapture(private val context: Context) {
 
     @Volatile private var stopped = true
     @Volatile private var frameWanted = false
-    @Volatile private var latestYaw = 0f
+    @Volatile private var latestRotation = FloatArray(9)
 
     /** Without a (game) rotation vector sensor there is nothing to time the frames by. */
     val available: Boolean get() = sensor.available
@@ -45,7 +47,13 @@ class PanoramaCapture(private val context: Context) {
      * Starts taking a frame after every [stepDeg] of turning. [onChange] reports progress; [onFinished] is called
      * once the turn reaches about 360°, and the caller should then [stop].
      */
-    fun start(analysis: ImageAnalysis, stepDeg: Float, onChange: (PanoramaStatus) -> Unit, onFinished: () -> Unit) {
+    fun start(
+        analysis: ImageAnalysis,
+        stepDeg: Float,
+        surfaceRotation: Int,
+        onChange: (PanoramaStatus) -> Unit,
+        onFinished: () -> Unit,
+    ) {
         check(worker == null) { "Panorama already running" }
         val worker = Executors.newSingleThreadExecutor().also { worker = it }
         val mainExecutor = ContextCompat.getMainExecutor(context)
@@ -67,7 +75,9 @@ class PanoramaCapture(private val context: Context) {
                 return@setAnalyzer
             }
             try {
-                val frame = PanoramaFrame(upright(image), latestYaw)
+                val rotation = latestRotation
+                val upright = upright(image)
+                val frame = PanoramaFrame(upright.toJpeg(FRAME_JPEG_QUALITY), upright.width, rotation, surfaceRotation)
                 synchronized(frames) {
                     if (stopped) return@setAnalyzer
                     frames += frame
@@ -79,8 +89,8 @@ class PanoramaCapture(private val context: Context) {
                 Log.e(TAG, "Converting a panorama frame failed", e)
             }
         }
-        sensor.start { yawDeg, pitchDeg ->
-            latestYaw = yawDeg
+        sensor.start { yawDeg, pitchDeg, rotation ->
+            latestRotation = rotation.copyOf()
             if (progress.onYaw(yawDeg)) frameWanted = true
             level = isLevel(pitchDeg)
             report()
@@ -130,13 +140,12 @@ class PanoramaCapture(private val context: Context) {
             rotation = it.imageInfo.rotationDegrees
             rgbaToRaster(bytes, it.width, it.height, plane.rowStride, plane.pixelStride)
         }
-        val turned = raster.rotate(rotation)
-        return if (turned.height > MAX_FRAME_HEIGHT) turned.scaleToHeight(MAX_FRAME_HEIGHT) else turned
+        return raster.rotate(rotation)
     }
 
     private companion object {
         const val TAG = "PanoramaCapture"
-        const val MAX_FRAME_HEIGHT = 960
+        const val FRAME_JPEG_QUALITY = 95
         const val LAST_FRAME_WAIT_MS = 500L
         const val LAST_FRAME_POLL_MS = 16L
     }
@@ -154,7 +163,7 @@ fun rgbaToRaster(bytes: ByteArray, width: Int, height: Int, rowStride: Int, pixe
 
 /**
  * How the frames go left to right: [order] lists capture indexes, [expectedDx] the shift between neighbours on
- * the cylinder that the compass predicts. Turning left yields the frames right to left, so they are reversed.
+ * the sphere that the sensor predicts. Turning left yields the frames right to left, so they are reversed.
  */
 internal class PanoramaLayout(val order: List<Int>, val expectedDx: List<Int>)
 
@@ -170,36 +179,30 @@ internal fun panoramaLayout(yawsDeg: List<Float>, focalPx: Double): PanoramaLayo
 }
 
 /**
- * Projects [frames] onto a cylinder of radius [focalPx], aligns neighbours starting from the compass shift and
- * blends them. [onProgress] gets 0..1; cancellation is checked between frames.
+ * Stitches [frames] at [scale] of their size (below 1 when memory ran short). [focalPx] is the focal length in
+ * pixels of the frames as taken. [onProgress] gets 0..1; cancellation is checked between frames.
  */
-suspend fun stitchPanorama(frames: List<PanoramaFrame>, focalPx: Double, onProgress: (Float) -> Unit): Raster {
-    require(frames.size >= 2) { "A panorama needs at least two frames" }
-    val layout = panoramaLayout(frames.map { it.yawDeg }, focalPx)
-    // Warping each frame and aligning each pair; the blend itself ends at 1.
-    val steps = frames.size * 2
-    var done = 0
-    fun stepDone() {
-        done++
-        onProgress(done.toFloat() / steps)
+suspend fun stitchPanorama(frames: List<PanoramaFrame>, focalPx: Double, scale: Double = 1.0, onProgress: (Float) -> Unit): Panorama {
+    val oriented = frames.map { frame ->
+        OrientedFrame(frame.rotation, frame.surfaceRotation) {
+            val image = decodeJpeg(frame.jpeg)
+            if (scale < 1.0) image.scaleToHeight((image.height * scale).roundToInt()) else image
+        }
     }
-
-    val warped = layout.order.map { index ->
-        currentCoroutineContext().ensureActive()
-        cylindricalWarp(frames[index].image, focalPx).also { stepDone() }
-    }
-    val shifts = layout.expectedDx.mapIndexed { i, expectedDx ->
-        currentCoroutineContext().ensureActive()
-        val shift = estimateShift(warped[i], warped[i + 1], expectedDx, searchX = expectedDx / 4, searchY = SEARCH_Y)
-        stepDone()
-        // stitch() needs every frame to the right of the previous one.
-        if (shift.dx > 0) shift else Shift(expectedDx, 0, confident = false)
-    }
-    currentCoroutineContext().ensureActive()
-    return stitch(warped, shifts).also { onProgress(1f) }
+    return stitchFrames(oriented, focalPx * scale, onProgress)
 }
 
-private const val SEARCH_Y = 24
+/** An opaque raster from JPEG bytes. */
+private fun decodeJpeg(jpeg: ByteArray): Raster {
+    val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: error("Panorama frame did not decode")
+    try {
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        return Raster(bitmap.width, bitmap.height, pixels)
+    } finally {
+        bitmap.recycle()
+    }
+}
 
 /** JPEG bytes of an opaque raster. */
 fun Raster.toJpeg(quality: Int): ByteArray {

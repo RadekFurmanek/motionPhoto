@@ -48,8 +48,11 @@ import cz.furmanek.motionphoto.R
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.media.MediaStoreWriter
 import cz.furmanek.motionphoto.media.SavedMedia
+import cz.furmanek.motionphoto.panorama.Attitude
 import cz.furmanek.motionphoto.panorama.PanoramaCapture
+import cz.furmanek.motionphoto.panorama.PanoramaSensor
 import cz.furmanek.motionphoto.panorama.PanoramaStatus
+import cz.furmanek.motionphoto.panorama.attitudeOf
 import cz.furmanek.motionphoto.panorama.focalLengthPx
 import cz.furmanek.motionphoto.panorama.stitchPanorama
 import cz.furmanek.motionphoto.panorama.toJpeg
@@ -121,6 +124,8 @@ data class PanoramaUiState(
     val yawToNextDeg: Float = 0f,
     /** 1 sweeping right, −1 left, 0 before the first move. */
     val direction: Int = 0,
+    /** The camera's tilt in degrees when the capture started: the height the target dot holds. */
+    val startPitchDeg: Float? = null,
     val stitchingProgress: Float? = null,
 )
 
@@ -202,6 +207,14 @@ class CameraSession(
     private var timelapseClock: Job? = null
     private val panoramaCapture = PanoramaCapture(app)
     private var panoramaJob: Job? = null
+
+    /** Feeds [panoramaAttitude] while Panorama mode is on screen, before and during a capture. */
+    private val levelSensor = PanoramaSensor(app)
+    private var levelSensorRunning = false
+    private val _panoramaAttitude = MutableStateFlow<Attitude?>(null)
+
+    /** The phone's sideways roll and the camera's tilt for the panorama level; null outside Panorama mode. */
+    val panoramaAttitude: StateFlow<Attitude?> = _panoramaAttitude.asStateFlow()
 
     // Built on first use, so modes other than Portrait never pay for ML Kit. Lives as long as the session,
     // which is the app process; there is no point at which to close it.
@@ -331,6 +344,7 @@ class CameraSession(
         if (!uiVisible) cancelPanorama()
         updatePortraitPreview()
         updatePreRoll()
+        updatePanoramaLevel()
         routePreview()
         // Another screen (capture for another app) may have bound the camera meanwhile, which unbinds ours.
         val preview = preview
@@ -667,14 +681,15 @@ class CameraSession(
         val stepDeg = fovDeg / PANORAMA_STEPS_PER_FOV
         val optics = PanoramaOptics(focalMm, sensorMm, fovDeg, stepDeg, System.currentTimeMillis())
         panoramaOptics = optics
-        _state.update { it.copy(panorama = PanoramaUiState(capturing = true, yawToNextDeg = stepDeg)) }
+        val startPitchDeg = _panoramaAttitude.value?.pitchDeg
+        _state.update { it.copy(panorama = PanoramaUiState(capturing = true, yawToNextDeg = stepDeg, startPitchDeg = startPitchDeg)) }
         zoomJob?.cancel()
         requestedZoomRatio = zoomRatio
         // Frames are taken only once the zoom has settled; a stop or cancel in between leaves nothing to start.
         val zoomed = camera.cameraControl.setZoomRatio(zoomRatio)
         zoomed.addListener({
             if (panoramaOptics === optics && _state.value.panorama?.capturing == true) {
-                panoramaCapture.start(analysis, stepDeg, ::onPanoramaStatus, onFinished = ::finishPanorama)
+                panoramaCapture.start(analysis, stepDeg, targetRotation, ::onPanoramaStatus, onFinished = ::finishPanorama)
             }
         }, ContextCompat.getMainExecutor(app))
     }
@@ -709,22 +724,30 @@ class CameraSession(
                 val location = async {
                     if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
                 }
-                val jpeg = withContext(Dispatchers.Default) {
-                    val focalPx = focalLengthPx(optics.focalMm, optics.sensorMm, frames.first().image.width)
+                val (panorama, jpeg) = withContext(Dispatchers.Default) {
+                    val focalPx = focalLengthPx(optics.focalMm, optics.sensorMm, frames.first().width)
                     // The focal length is the first one the lens lists; this lets a phone test check it.
                     Log.i(
                         TAG,
                         "Panorama optics: focalMm=${optics.focalMm} sensorMm=${optics.sensorMm} fovDeg=${optics.fovDeg} " +
                             "stepDeg=${optics.stepDeg} focalPx=$focalPx",
                     )
-                    stitchPanorama(frames, focalPx) { progress ->
+                    val onProgress = { progress: Float ->
                         _state.update { it.copy(panorama = it.panorama?.copy(stitchingProgress = progress)) }
-                    }.toJpeg(PANORAMA_JPEG_QUALITY)
+                    }
+                    val stitched = try {
+                        stitchPanorama(frames, focalPx, onProgress = onProgress)
+                    } catch (_: OutOfMemoryError) {
+                        // A wide turn on a small heap: a smaller panorama beats none.
+                        Log.w(TAG, "Stitching the panorama ran out of memory; retrying smaller")
+                        stitchPanorama(frames, focalPx, PANORAMA_RETRY_SCALE, onProgress)
+                    }
+                    stitched to stitched.image.toJpeg(PANORAMA_JPEG_QUALITY)
                 }
                 val savedLocation = location.await()
                 // Once writing starts it completes, so a late cancel cannot leave a half-written entry.
                 val uri = withContext(NonCancellable + Dispatchers.IO) {
-                    writer.savePanorama(jpeg, optics.startedAtMillis, savedLocation)
+                    writer.savePanorama(jpeg, panorama, optics.startedAtMillis, savedLocation)
                 }
                 _state.update { it.copy(lastCapture = uri) }
                 _events.tryEmit(SessionEvent.Saved(SavedMedia(uri, MediaKind.PANORAMA)))
@@ -1105,6 +1128,20 @@ class CameraSession(
         }
         updatePortraitPreview()
         updatePreRoll()
+        updatePanoramaLevel()
+    }
+
+    /** Runs the panorama level's sensor while Panorama mode is bound and the app is on screen; stops it otherwise. */
+    private fun updatePanoramaLevel() {
+        if (uiVisible && boundKey?.mode == CaptureMode.PANORAMA) {
+            if (levelSensorRunning) return
+            levelSensorRunning = true
+            levelSensor.start { _, _, rotation -> _panoramaAttitude.value = attitudeOf(rotation) }
+        } else {
+            levelSensor.stop()
+            levelSensorRunning = false
+            _panoramaAttitude.value = null
+        }
     }
 
     /** Runs the live photo's pre-roll encoder while it is bound and the app is on screen; stops it otherwise. */
@@ -1346,7 +1383,9 @@ class CameraSession(
         fun PhotoAspect.streamAspect(): Int =
             if (this == PhotoAspect.RATIO_16_9) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
 
-        const val PANORAMA_STEPS_PER_FOV = 3
+        // Neighbours overlap by a third: enough for the seam, and fewer frames to hold and join.
+        const val PANORAMA_STEPS_PER_FOV = 1.5f
+        const val PANORAMA_RETRY_SCALE = 0.6
         const val PANORAMA_JPEG_QUALITY = 92
 
         /**
@@ -1355,7 +1394,7 @@ class CameraSession(
          * Near 960×720 for the live portrait: it is blurred at 480 px tall.
          */
         fun analysisSize(mode: CaptureMode): android.util.Size = when (mode) {
-            CaptureMode.PANORAMA -> android.util.Size(1280, 960)
+            CaptureMode.PANORAMA -> android.util.Size(1920, 1440)
             CaptureMode.PORTRAIT -> android.util.Size(960, 720)
             else -> android.util.Size(1920, 1080)
         }
