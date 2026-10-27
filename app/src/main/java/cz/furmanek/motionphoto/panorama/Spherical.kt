@@ -237,12 +237,24 @@ private fun framePanorama(
 ): Panorama {
     val fullWidth = (2 * PI * focalPx).roundToInt()
     val fullHeight = fullWidth / 2
-    // The painted columns of the best covered row.
+    // The longest painted run of the best covered row: a missed frame leaves a gap, and only one side is kept.
     val counts = IntArray(canvas.height) { y -> (0 until canvas.width).count { canvas.pixels[y * canvas.width + it].alpha() != 0 } }
     val middle = counts.indices.maxByOrNull { counts[it] } ?: 0
-    val painted = (0 until canvas.width).filter { canvas.pixels[middle * canvas.width + it].alpha() != 0 }
-    var from = painted.firstOrNull() ?: 0
-    var to = (painted.lastOrNull() ?: (canvas.width - 1)) + 1
+    var from = 0
+    var to = 0
+    var runStart = -1
+    for (x in 0..canvas.width) {
+        val painted = x < canvas.width && canvas.pixels[middle * canvas.width + x].alpha() != 0
+        if (painted && runStart < 0) runStart = x
+        if (!painted && runStart >= 0) {
+            if (x - runStart > to - from) {
+                from = runStart
+                to = x
+            }
+            runStart = -1
+        }
+    }
+    if (to == 0) to = canvas.width
     if (to - from > fullWidth) {
         from += (to - from - fullWidth) / 2
         to = from + fullWidth

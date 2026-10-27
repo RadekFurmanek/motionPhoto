@@ -160,4 +160,16 @@ class SphericalTest {
         assertTrue("width ${panorama.image.width}", panorama.image.width >= span)
         assertTrue("width ${panorama.image.width}", panorama.image.width <= span + 2 * 240)
     }
+
+    @Test
+    fun missedFrameKeepsTheLongestPieceWithoutBlack() = runTest {
+        val f = 250.0
+        // No overlap between 35° and 140°: a frame was missed while turning fast.
+        val panorama = stitchFrames(frames(::world, listOf(0.0, 35.0, 140.0, 175.0, 210.0), f), f) {}
+        val image = panorama.image
+        var black = 0
+        for (y in 0 until image.height) for (x in 0 until image.width) if (image.pixel(x, y) and 0xFFFFFF == 0) black++
+        assertEquals(0, black)
+        assertTrue("width ${image.width}", image.width >= (Math.toRadians(70.0) * f).toInt())
+    }
 }
