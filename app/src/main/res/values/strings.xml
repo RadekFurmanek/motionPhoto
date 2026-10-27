@@ -85,4 +85,9 @@
     <string name="timelapse_notification_title">Natáčí se časosběr</string>
     <string name="panorama_too_short">Panorama je příliš krátká, otočte telefonem dál. Nic se neuložilo</string>
     <string name="panorama_failed">Panoramu se nepodařilo složit</string>
+    <string name="panorama_hold_level">Držte telefon rovně</string>
+    <string name="panorama_stitching">Skládám panorama…</string>
+    <string name="panorama_progress">Snímky: %1$d · %2$d°</string>
+    <string name="panorama_start">Spustit panorama</string>
+    <string name="panorama_stop">Dokončit panorama</string>
 </resources>

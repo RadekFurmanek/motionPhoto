@@ -85,6 +85,8 @@ import cz.furmanek.motionphoto.ui.components.GridOverlay
 import cz.furmanek.motionphoto.ui.components.LastCaptureThumbnail
 import cz.furmanek.motionphoto.ui.components.LensChips
 import cz.furmanek.motionphoto.ui.components.ModeBar
+import cz.furmanek.motionphoto.ui.components.PanoramaGuide
+import cz.furmanek.motionphoto.ui.components.PanoramaStitching
 import cz.furmanek.motionphoto.ui.components.QuickSettingsBar
 import cz.furmanek.motionphoto.ui.components.RecordingIndicator
 import cz.furmanek.motionphoto.ui.components.ShutterButton
@@ -209,6 +211,15 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
             focusPoint?.let { FocusIndicator(position = it, key = focusTapCount) }
         }
 
+        state.panorama?.let { panorama ->
+            val stitching = panorama.stitchingProgress
+            if (panorama.capturing) {
+                PanoramaGuide(panorama)
+            } else if (stitching != null) {
+                PanoramaStitching(stitching, Modifier.align(Alignment.Center))
+            }
+        }
+
         state.countdown?.let {
             Text(
                 text = it.toString(),
@@ -294,6 +305,7 @@ private fun BottomControls(
     val context = LocalContext.current
     val capabilities = state.capabilities
     val recording = state.recording
+    val panorama = state.panorama
     val locked = state.controlsLocked
     val ready = state.status == SessionStatus.READY
     val isVideo = settings.mode.isVideo()
@@ -323,7 +335,8 @@ private fun BottomControls(
     ) {
         exposureSlider()
 
-        if (ready && capabilities != null) {
+        // A panorama runs at 1× on the lens it started with.
+        if (ready && capabilities != null && panorama == null) {
             val lenses = capabilities.backLenses
             if (lenses.isNotEmpty() && state.lensFacing == LENS_FACING_BACK) {
                 LensChips(lenses, state.activeCameraId, onSelect = { if (!locked) viewModel.selectBackCamera(it) })
@@ -338,8 +351,8 @@ private fun BottomControls(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (recording != null && recording.kind == RecordingKind.TIMELAPSE) {
-                // A time-lapse has nothing to pause: stopping keeps what was taken.
+            if (panorama != null || recording?.kind == RecordingKind.TIMELAPSE) {
+                // A time-lapse or panorama has nothing to pause, and opening the gallery would end a panorama.
                 Spacer(Modifier.size(56.dp))
             } else if (recording != null) {
                 RoundButton(
@@ -357,15 +370,16 @@ private fun BottomControls(
 
             ShutterButton(
                 isVideo = isVideo,
-                isRecording = recording != null,
+                isRecording = recording != null || panorama?.capturing == true,
                 showClipProgress = state.busy && state.countdown == null && settings.mode == CaptureMode.PHOTO &&
                     settings.effectiveLivePhoto() && state.livePhotoAvailable,
                 // The maker's portrait, night and HDR processing can take seconds.
                 processing = state.busy && state.countdown == null &&
                     (settings.mode == CaptureMode.PORTRAIT || settings.mode == CaptureMode.NIGHT || settings.hdr),
-                // During the self-timer the shutter cancels the countdown.
-                enabled = ready && (!state.busy || state.countdown != null),
+                // During the self-timer the shutter cancels the countdown; a panorama being stitched cannot be stopped.
+                enabled = ready && (!state.busy || state.countdown != null) && panorama?.stitchingProgress == null,
                 onClick = viewModel::onShutter,
+                isPanorama = settings.mode == CaptureMode.PANORAMA,
             )
 
             val canSwitch = capabilities?.let { it.hasFrontCamera && it.hasBackCamera } == true && !locked

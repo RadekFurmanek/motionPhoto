@@ -10,7 +10,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -29,6 +32,7 @@ private val RecordRed = Color(0xFFE53935)
 /**
  * Photo: white disc, with a progress ring while a live photo's clip records.
  * Video: red disc to start, red square to stop.
+ * Panorama: white disc with a start arrow, red square to finish.
  */
 @Composable
 fun ShutterButton(
@@ -38,6 +42,7 @@ fun ShutterButton(
     enabled: Boolean,
     onClick: () -> Unit,
     processing: Boolean = false,
+    isPanorama: Boolean = false,
 ) {
     val progress = remember { Animatable(0f) }
     LaunchedEffect(showClipProgress) {
@@ -50,11 +55,33 @@ fun ShutterButton(
             .size(80.dp)
             .clip(CircleShape)
             .border(4.dp, Color.White, CircleShape)
-            .clickable(enabled = enabled, role = Role.Button, onClickLabel = stringResource(R.string.shutter), onClick = onClick),
+            .clickable(
+                enabled = enabled,
+                role = Role.Button,
+                onClickLabel = stringResource(
+                    when {
+                        !isPanorama -> R.string.shutter
+                        isRecording -> R.string.panorama_stop
+                        else -> R.string.panorama_start
+                    },
+                ),
+                onClick = onClick,
+            ),
     ) {
         val alpha = if (enabled) 1f else 0.5f
         when {
             isRecording -> Box(Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)).background(RecordRed))
+            isPanorama -> Box(
+                Modifier.size(64.dp).clip(CircleShape).background(Color.White.copy(alpha = alpha)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    contentDescription = null,
+                    tint = Color.Black.copy(alpha = alpha),
+                    modifier = Modifier.size(36.dp),
+                )
+            }
             isVideo -> Box(Modifier.size(64.dp).clip(CircleShape).background(RecordRed.copy(alpha = alpha)))
             else -> Box(Modifier.size(64.dp).clip(CircleShape).background(Color.White.copy(alpha = alpha)))
         }

@@ -82,5 +82,5 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch { settingsRepository.update(transform) }
     }
 
-    private fun isLocked(): Boolean = sessionState.value.busy || sessionState.value.recording != null
+    private fun isLocked(): Boolean = sessionState.value.controlsLocked
 }
