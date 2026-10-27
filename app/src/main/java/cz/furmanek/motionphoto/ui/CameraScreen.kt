@@ -55,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -96,6 +97,7 @@ import cz.furmanek.motionphoto.ui.components.ZoomChips
 import cz.furmanek.motionphoto.ui.components.outputAspect
 import kotlin.math.abs
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collectLatest
 
 private const val FOCUS_INDICATOR_VISIBLE_MS = 1_200L
@@ -107,7 +109,6 @@ private val MODE_SWIPE_THRESHOLD = 48.dp
 fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
     val state by viewModel.sessionState.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
-    val portraitFrame by viewModel.portraitFrame.collectAsStateWithLifecycle(initialValue = null)
     val context = LocalContext.current
     val resources = LocalResources.current
     val displayRotation = LocalView.current.display?.rotation ?: Surface.ROTATION_0
@@ -191,16 +192,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
     ) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
 
-        // The live portrait's blurred background: the same 3:4 frame as the preview, fitted the same way, and
-        // transparent over the subject, which stays the sharp preview. It takes no touches, so taps still focus.
-        portraitFrame?.let { frame ->
-            Image(
-                bitmap = frame,
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
+        PortraitOverlay(viewModel.portraitFrame, Modifier.fillMaxSize())
 
         // Taps go to the PreviewView's metering factory, which uses the same coordinates as this overlay.
         // The transform detector comes after the tap detector, so it sees pinches first and consumes them.
@@ -472,5 +464,18 @@ private fun Context.openMedia(uri: Uri) {
         startActivity(intent)
     } catch (_: ActivityNotFoundException) {
         // No gallery app installed; the capture is still saved in DCIM/Camera.
+    }
+}
+
+/**
+ * The live portrait's blurred background: the same 3:4 frame as the preview, fitted the same way, and
+ * transparent over the subject, which stays the sharp preview. It takes no touches, so taps still focus.
+ * Collected here, so a new frame (up to 20 a second) recomposes only this overlay, not the whole screen.
+ */
+@Composable
+private fun PortraitOverlay(frames: Flow<ImageBitmap?>, modifier: Modifier = Modifier) {
+    val frame by frames.collectAsStateWithLifecycle(initialValue = null)
+    frame?.let {
+        Image(bitmap = it, contentDescription = null, contentScale = ContentScale.Fit, modifier = modifier)
     }
 }
