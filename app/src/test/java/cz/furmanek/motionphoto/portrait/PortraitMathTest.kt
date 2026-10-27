@@ -1,6 +1,7 @@
 package cz.furmanek.motionphoto.portrait
 
 import cz.furmanek.motionphoto.panorama.Raster
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -110,5 +111,53 @@ class PortraitMathTest {
         val pixels = intArrayOf(0xFF102030.toInt(), 0xFF405060.toInt(), 0xFF708090.toInt(), 0xFFA0B0C0.toInt())
         assertEquals(0xFF102030.toInt(), argbAt(pixels, 2, 2, -3f, -0.4f))
         assertEquals(0xFFA0B0C0.toInt(), argbAt(pixels, 2, 2, 5f, 1.6f))
+    }
+
+    // A 2 x 3 mask, row by row:  0 1 / 2 3 / 4 5
+    private val tall = FloatArray(6) { it.toFloat() }
+
+    @Test
+    fun `a 2x3 mask turned 90 degrees is 3x2 with the left column on top`() {
+        assertEquals(3 to 2, turnedSize(2, 3, 90))
+        assertArrayEquals(floatArrayOf(4f, 2f, 0f, 5f, 3f, 1f), rotateMask(tall, 2, 3, 90), 0f)
+    }
+
+    @Test
+    fun `a 2x3 mask turned 180 and 270 degrees`() {
+        assertArrayEquals(floatArrayOf(5f, 4f, 3f, 2f, 1f, 0f), rotateMask(tall, 2, 3, 180), 0f)
+        assertArrayEquals(floatArrayOf(1f, 3f, 5f, 0f, 2f, 4f), rotateMask(tall, 2, 3, 270), 0f)
+    }
+
+    @Test
+    fun `turning by 90 then 270 is the identity`() =
+        assertArrayEquals(tall, rotateMask(rotateMask(tall, 2, 3, 90), 3, 2, 270), 0f)
+
+    @Test
+    fun `upright pixels match the rotated mask`() {
+        val pixels = IntArray(6) { it }
+        assertArrayEquals(intArrayOf(4, 2, 0, 5, 3, 1), storedToUpright(pixels, 2, 3, 90, false))
+    }
+
+    @Test
+    fun `exif transpose swaps rows and columns`() {
+        // EXIF orientation 5: rotationDegrees 90, flipped; upright(x, y) = stored(y, x).
+        assertArrayEquals(intArrayOf(0, 2, 4, 1, 3, 5), storedToUpright(IntArray(6) { it }, 2, 3, 90, true))
+    }
+
+    @Test
+    fun `exif flip vertical mirrors top to bottom`() {
+        // EXIF orientation 4: rotationDegrees 180, flipped.
+        assertArrayEquals(intArrayOf(4, 5, 2, 3, 0, 1), storedToUpright(IntArray(6) { it }, 2, 3, 180, true))
+    }
+
+    @Test
+    fun `a mask of the upright image maps back onto the stored pixels for every orientation`() {
+        for (degrees in intArrayOf(0, 90, 180, 270)) for (flip in booleanArrayOf(false, true)) {
+            val upright = storedToUpright(IntArray(6) { it }, 2, 3, degrees, flip)
+            val (uw, uh) = turnedSize(2, 3, degrees)
+            // A mask that holds, at each upright pixel, the stored index it came from.
+            val mask = FloatArray(upright.size) { upright[it].toFloat() }
+            assertArrayEquals("$degrees $flip", tall, uprightToStored(mask, uw, uh, degrees, flip), 0f)
+        }
     }
 }

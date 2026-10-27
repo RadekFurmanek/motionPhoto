@@ -28,21 +28,29 @@ class PortraitProcessor(private val masker: SubjectMasker) {
         var small: Bitmap? = null
         var temp: File? = null
         try {
-            // Pixels stay as stored (not rotated); the mask comes from the same pixels and the EXIF orientation is kept.
-            photo = decode(jpeg, resolution) ?: return@withContext PortraitOutcome.FAILED
+            // Pixels stay as stored (not rotated) and the EXIF orientation is kept; only the segmenter sees them upright.
+            val exif = ExifInterface(jpeg)
+            val degrees = exif.rotationDegrees
+            val flipped = exif.isFlipped
+            // On API 26+ a decode that runs out of native memory returns null instead of throwing.
+            photo = decode(jpeg, resolution) ?: return@withContext when (resolution) {
+                PortraitResolution.FULL -> PortraitOutcome.OUT_OF_MEMORY
+                PortraitResolution.STANDARD -> PortraitOutcome.FAILED
+            }
             val (maskWidth, maskHeight) = fitInside(photo.width, photo.height, MASK_MAX_SIDE)
             small = photo.scale(maskWidth, maskHeight)
-
-            val mask = masker.mask(small) ?: return@withContext PortraitOutcome.MODEL_MISSING
-            if (!hasSubject(mask.confidence)) return@withContext PortraitOutcome.NO_SUBJECT
-            val longest = max(maskWidth, maskHeight)
-            val soft = blurMask(mask.confidence, maskWidth, maskHeight, radius(longest, MASK_FEATHER))
-
             val smallPixels = IntArray(maskWidth * maskHeight)
             small.getPixels(smallPixels, 0, maskWidth, 0, 0, maskWidth, maskHeight)
-            val background = boxBlur(Raster(maskWidth, maskHeight, smallPixels), radius(longest, BACKGROUND_BLUR)).pixels
             if (small !== photo) small.recycle()
             small = null
+
+            val confidence = segmentUpright(smallPixels, maskWidth, maskHeight, degrees, flipped)
+                ?: return@withContext PortraitOutcome.MODEL_MISSING
+            if (!hasSubject(confidence)) return@withContext PortraitOutcome.NO_SUBJECT
+            val longest = max(maskWidth, maskHeight)
+            val soft = blurMask(confidence, maskWidth, maskHeight, radius(longest, MASK_FEATHER))
+
+            val background = boxBlur(Raster(maskWidth, maskHeight, smallPixels), radius(longest, BACKGROUND_BLUR)).pixels
 
             ensureActive()
             composite(photo, soft, background, maskWidth, maskHeight)
@@ -71,15 +79,33 @@ class PortraitProcessor(private val masker: SubjectMasker) {
         }
     }
 
+    /**
+     * Segments the small stored image turned upright, as the segmenter expects people standing, and returns
+     * the confidence mask turned back to the stored [width] x [height]; null when the model is missing.
+     */
+    private suspend fun segmentUpright(pixels: IntArray, width: Int, height: Int, degrees: Int, flipped: Boolean): FloatArray? {
+        val (uprightWidth, uprightHeight) = turnedSize(width, height, degrees)
+        val upright = Bitmap.createBitmap(
+            storedToUpright(pixels, width, height, degrees, flipped), uprightWidth, uprightHeight, Bitmap.Config.ARGB_8888,
+        )
+        try {
+            val mask = masker.mask(upright) ?: return null
+            return uprightToStored(mask.confidence, mask.width, mask.height, degrees, flipped)
+        } finally {
+            upright.recycle()
+        }
+    }
+
     private fun decode(jpeg: File, resolution: PortraitResolution): Bitmap? {
         val options = BitmapFactory.Options().apply {
             inMutable = true
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(jpeg.path, bounds)
+        // An unreadable file is a failure; a null from the real decode below then means memory ran out.
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IOException("Cannot read ${jpeg.name}")
         if (resolution == PortraitResolution.STANDARD) {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(jpeg.path, bounds)
-            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
             options.inSampleSize = standardSampleSize(bounds.outWidth, bounds.outHeight)
         }
         return BitmapFactory.decodeFile(jpeg.path, options)

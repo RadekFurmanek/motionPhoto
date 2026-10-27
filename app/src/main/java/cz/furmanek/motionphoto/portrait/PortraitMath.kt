@@ -93,6 +93,62 @@ private fun bilinearChannel(p00: Int, p10: Int, p01: Int, p11: Int, shift: Int, 
 }
 
 /**
+ * Index in a [width] x [height] image of the pixel that lands at [index] after turning it clockwise by
+ * [degrees] (0, 90, 180 or 270) and then, if [flip], mirroring it left to right.
+ * This is how EXIF orientation turns stored pixels upright (ExifInterface rotationDegrees and isFlipped).
+ */
+private fun uprightSource(index: Int, width: Int, height: Int, degrees: Int, flip: Boolean): Int {
+    val turned = degrees == 90 || degrees == 270
+    val outWidth = if (turned) height else width
+    val outHeight = if (turned) width else height
+    val y = index / outWidth
+    val x = (index % outWidth).let { if (flip) outWidth - 1 - it else it }
+    return when (degrees) {
+        0 -> y * width + x
+        90 -> (height - 1 - x) * width + y
+        180 -> (outHeight - 1 - y) * width + (width - 1 - x)
+        else -> x * width + (width - 1 - y)
+    }
+}
+
+private fun normalizedTurn(degrees: Int): Int {
+    val turn = ((degrees % 360) + 360) % 360
+    require(turn % 90 == 0) { "Only multiples of 90 degrees, got $degrees" }
+    return turn
+}
+
+/** Size of a [width] x [height] image after a clockwise turn by [degrees]. */
+fun turnedSize(width: Int, height: Int, degrees: Int): Pair<Int, Int> =
+    if (normalizedTurn(degrees) % 180 == 0) width to height else height to width
+
+/** Turns stored ARGB [pixels] upright: clockwise by [degrees], then mirrored left to right if [flip]. */
+fun storedToUpright(pixels: IntArray, width: Int, height: Int, degrees: Int, flip: Boolean): IntArray {
+    require(pixels.size == width * height) { "Expected ${width * height} pixels, got ${pixels.size}" }
+    val turn = normalizedTurn(degrees)
+    return IntArray(pixels.size) { pixels[uprightSource(it, width, height, turn, flip)] }
+}
+
+/**
+ * The inverse of [storedToUpright] for a mask: [mask] is [uprightWidth] x [uprightHeight] and the result
+ * lines up with the stored pixels the upright image came from.
+ */
+fun uprightToStored(mask: FloatArray, uprightWidth: Int, uprightHeight: Int, degrees: Int, flip: Boolean): FloatArray {
+    require(mask.size == uprightWidth * uprightHeight) { "Expected ${uprightWidth * uprightHeight} values, got ${mask.size}" }
+    val turn = normalizedTurn(degrees)
+    val (width, height) = turnedSize(uprightWidth, uprightHeight, turn)
+    val stored = FloatArray(mask.size)
+    for (i in mask.indices) stored[uprightSource(i, width, height, turn, flip)] = mask[i]
+    return stored
+}
+
+/** Turns a [width] x [height] mask clockwise by [degrees] (a multiple of 90). */
+fun rotateMask(mask: FloatArray, width: Int, height: Int, degrees: Int): FloatArray {
+    require(mask.size == width * height) { "Expected ${width * height} values, got ${mask.size}" }
+    val turn = normalizedTurn(degrees)
+    return FloatArray(mask.size) { mask[uprightSource(it, width, height, turn, false)] }
+}
+
+/**
  * Blur planes hold values as fixed point with this many fraction bits, so box sums are exact:
  * a flat area stays flat and an empty one stays empty, with no float drift in the running sum.
  */
