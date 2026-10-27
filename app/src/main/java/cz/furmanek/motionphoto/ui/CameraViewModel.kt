@@ -81,6 +81,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun selectBackCamera(cameraId: String?) = session.selectBackCamera(cameraId)
 
+    fun setMacro(on: Boolean) = session.setMacro(on)
+
     fun focusAt(x: Float, y: Float) = session.focusAt(x, y)
 
     fun zoomBy(scaleFactor: Float) = session.zoomBy(scaleFactor)

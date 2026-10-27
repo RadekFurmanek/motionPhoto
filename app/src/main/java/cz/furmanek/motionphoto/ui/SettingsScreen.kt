@@ -33,11 +33,15 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import cz.furmanek.motionphoto.R
 import cz.furmanek.motionphoto.camera.CameraCapabilities
+import cz.furmanek.motionphoto.camera.LensInfo
+import cz.furmanek.motionphoto.camera.MacroSetup
+import cz.furmanek.motionphoto.camera.minFocusCm
 import cz.furmanek.motionphoto.camera.resolveVideoQuality
 import cz.furmanek.motionphoto.camera.usesCustomPortrait
 import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.PortraitResolution
+import cz.furmanek.motionphoto.ui.components.formatZoom
 import cz.furmanek.motionphoto.ui.components.labelRes
 
 @Composable
@@ -187,8 +191,38 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            if (capabilities != null && capabilities.lenses.isNotEmpty()) {
+                Section(stringResource(R.string.settings_section_cameras))
+                Text(
+                    stringResource(R.string.settings_cameras_summary),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+                when (val macro = capabilities.macro) {
+                    is MacroSetup.Lens -> InfoRow(stringResource(R.string.macro_uses_lens, macro.physicalId ?: macro.cameraId))
+                    is MacroSetup.Zoomed -> InfoRow(stringResource(R.string.macro_uses_zoom, formatZoom(macro.zoomRatio)))
+                    null -> Unit
+                }
+                capabilities.lenses.forEach { lens -> InfoRow(lensDescription(lens)) }
+            }
         }
     }
+}
+
+/** One camera on a line: its id, which way it faces, focal length and closest focus. */
+@Composable
+private fun lensDescription(lens: LensInfo): String {
+    val id = lens.physicalId?.let { stringResource(R.string.camera_physical, it, lens.cameraId) } ?: lens.cameraId
+    val facing = stringResource(if (lens.back) R.string.camera_back else R.string.camera_front)
+    val focus = minFocusCm(lens.minFocusDiopters)?.let { stringResource(R.string.camera_focus_cm, it) }
+        ?: stringResource(R.string.camera_focus_fixed)
+    return "$id · $facing · ${"%.1f".format(lens.focalMm)} mm · $focus"
+}
+
+@Composable
+private fun InfoRow(text: String) {
+    Text(text, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
 }
 
 @Composable

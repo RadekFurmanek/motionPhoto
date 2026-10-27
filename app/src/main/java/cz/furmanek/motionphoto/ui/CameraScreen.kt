@@ -93,6 +93,7 @@ import cz.furmanek.motionphoto.ui.components.GridOverlay
 import cz.furmanek.motionphoto.ui.components.rememberPhoneSteady
 import cz.furmanek.motionphoto.ui.components.LastCaptureThumbnail
 import cz.furmanek.motionphoto.ui.components.LensChips
+import cz.furmanek.motionphoto.ui.components.MacroChip
 import cz.furmanek.motionphoto.ui.components.ModeBar
 import cz.furmanek.motionphoto.ui.components.PanoramaGuide
 import cz.furmanek.motionphoto.ui.components.PanoramaLevel
@@ -387,10 +388,17 @@ private fun BottomControls(
         // A panorama runs at 1× on the lens it started with.
         if (ready && capabilities != null && panorama == null) {
             val lenses = capabilities.backLenses
-            if (lenses.isNotEmpty() && state.lensFacing == LENS_FACING_BACK) {
+            val macroOffered = capabilities.macro != null && settings.mode == CaptureMode.PHOTO && state.lensFacing == LENS_FACING_BACK
+            if (lenses.isNotEmpty() && state.lensFacing == LENS_FACING_BACK && !state.macro) {
                 LensChips(lenses, state.activeCameraId, onSelect = { if (!locked) viewModel.selectBackCamera(it) })
             }
-            ZoomChips(zoomPresets(capabilities.minZoom, capabilities.maxZoom), state.zoomRatio, onSelect = viewModel::setZoom)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (macroOffered) MacroChip(active = state.macro, onClick = { if (!locked) viewModel.setMacro(!state.macro) })
+                // Macro picks its own lens and zoom.
+                if (!state.macro) {
+                    ZoomChips(zoomPresets(capabilities.minZoom, capabilities.maxZoom), state.zoomRatio, onSelect = viewModel::setZoom)
+                }
+            }
         }
 
         ModeBar(modes, settings.mode, enabled = !locked, onSelect = viewModel::setMode)
