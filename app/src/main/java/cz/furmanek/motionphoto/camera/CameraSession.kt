@@ -10,6 +10,7 @@ import android.util.Rational
 import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
@@ -18,6 +19,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ExperimentalZeroShutterLag
+import androidx.camera.core.ExtendableBuilder
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.MeteringPointFactory
@@ -146,6 +148,8 @@ data class SessionState(
     /** The live photo clip starts before the press: after it only [PreRollRecorder.POST_ROLL_MS] is left to record. */
     val livePhotoPreRoll: Boolean = false,
     val panorama: PanoramaUiState? = null,
+    /** Macro is on (Photo mode, back camera). */
+    val macro: Boolean = false,
 ) {
     /** A capture, recording or panorama runs: mode, camera and capture settings must not change. */
     val controlsLocked: Boolean get() = busy || recording != null || panorama != null
@@ -272,6 +276,14 @@ class CameraSession(
     private var routedProvider: Preview.SurfaceProvider? = null
     private val uiVisible: Boolean get() = uiVisibility.anyVisible
     private var selectedBackCameraId: String? = null
+
+    /** Every camera and physical camera the phone lists; read once, when the camera first opens. */
+    private var lenses: List<LensInfo>? = null
+    private var macroSetup: MacroSetup? = null
+    private var macroOn = false
+
+    /** Binding the close-focusing camera failed once; Macro zooms the default camera instead. */
+    private var macroLensBroken = false
     private var targetRotation = Surface.ROTATION_0
     private var requestedZoomRatio = 1f
 
@@ -297,6 +309,7 @@ class CameraSession(
         val portrait: Boolean,
         val hdr: Boolean,
         val slowMotionFps: Int,
+        val macro: MacroSetup?,
     )
 
     init {
@@ -310,6 +323,8 @@ class CameraSession(
         scope.launch {
             settingsRepository.settings.collect { new ->
                 if (_state.value.panorama?.capturing == true && endsPanorama(settings, new)) cancelPanorama()
+                // Macro belongs to the back camera's Photo mode and is off again on return.
+                if (new.mode != CaptureMode.PHOTO || new.lensFacing != LENS_FACING_BACK) setMacroOff()
                 settings = new
                 settingsLoaded = true
                 // While the slider's write is still landing, the older value must not pull it back.
@@ -341,7 +356,10 @@ class CameraSession(
     fun onUiVisible(visible: Boolean) {
         if (visible) uiVisibility.shown() else uiVisibility.hidden()
         // A panorama and the live portrait run only while the app is on screen.
-        if (!uiVisible) cancelPanorama()
+        if (!uiVisible) {
+            cancelPanorama()
+            setMacroOff()
+        }
         updatePortraitPreview()
         updatePreRoll()
         updatePanoramaLevel()
@@ -375,6 +393,26 @@ class CameraSession(
         if (isLocked()) return
         selectedBackCameraId = cameraId
         requestBind()
+    }
+
+    /** Turns Macro on or off; it takes effect in the back camera's Photo mode. */
+    fun setMacro(on: Boolean) {
+        if (isLocked()) return
+        macroOn = on
+        _state.update { it.copy(macro = on) }
+        requestBind()
+    }
+
+    private fun setMacroOff() {
+        macroOn = false
+        _state.update { it.copy(macro = false) }
+    }
+
+    /** What Macro binds now: null while it is off or outside Photo on the back camera. */
+    private fun activeMacro(): MacroSetup? {
+        if (!macroOn || settings.mode != CaptureMode.PHOTO || settings.lensFacing != LENS_FACING_BACK) return null
+        val setup = macroSetup ?: return null
+        return if (setup is MacroSetup.Lens && macroLensBroken) MacroSetup.Zoomed(MACRO_ZOOM) else setup
     }
 
     /** Glides to [ratio] (a zoom preset), one zoom step per frame. */
@@ -861,6 +899,7 @@ class CameraSession(
         portrait = target.portrait,
         hdr = settings.hdr,
         slowMotionFps = settings.slowMotionFps,
+        macro = activeMacro(),
     )
 
     /** Rebinds when the binding-relevant settings changed; postponed while a capture or recording runs. */
@@ -890,9 +929,15 @@ class CameraSession(
         stopPortraitPreview()
         stopPreRoll()
         val provider = provider ?: ProcessCameraProvider.awaitInstance(app).also { provider = it }
+        val lenses = lenses ?: findLenses(provider).also { lenses = it }
 
         val selector = selectorFor(provider, key) ?: run {
             fail(app.getString(R.string.camera_error_no_camera))
+            return
+        }
+        if (key.macro is MacroSetup.Lens && macroLensBroken) {
+            Log.w(TAG, "The macro camera cannot be selected; zooming the default camera instead")
+            requestBind()
             return
         }
         val cameraInfo = provider.getCameraInfo(selector)
@@ -904,7 +949,7 @@ class CameraSession(
             extensions,
             hasRotationVector = panoramaCapture.available,
             customPortrait = customPortraitAvailable(),
-        )
+        ).copy(lenses = lenses, macro = macroSetup.takeIf { cameraInfo.lensFacing == CameraSelector.LENS_FACING_BACK })
         val lensFacing = cameraInfo.lensFacing
 
         // A stored mode or HDR this camera cannot do (other phone, front camera) is dropped; the settings
@@ -924,7 +969,7 @@ class CameraSession(
         val extensionMode = when {
             key.mode == CaptureMode.PORTRAIT && !customPortrait -> ExtensionMode.BOKEH
             key.mode == CaptureMode.NIGHT -> ExtensionMode.NIGHT
-            key.mode == CaptureMode.PHOTO && key.hdr -> ExtensionMode.HDR
+            key.mode == CaptureMode.PHOTO && key.hdr && key.macro == null -> ExtensionMode.HDR
             else -> null
         }
         val bindSelector = if (extensionMode != null && extensions != null) {
@@ -948,12 +993,16 @@ class CameraSession(
         }
 
         var lastError: RuntimeException? = null
+        // A macro lens inside the logical camera: every stream comes from it.
+        val physicalId = (key.macro as? MacroSetup.Lens)?.physicalId
         val wantsVideoExtras = key.videoFps60 || key.videoStabilization
         val attempts = bindingAttempts(key.mode, key.livePhoto, wantsVideoExtras, customPortrait)
         for (attempt in attempts) {
             if (attempt.preRoll && preRollBroken) continue
             val kinds = attempt.kinds
-            val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect)).build()
+            val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect))
+                .apply { usePhysicalCamera(physicalId) }
+                .build()
                 .also {
                     it.surfaceProvider = target.surfaceProvider
                     routedProvider = target.surfaceProvider
@@ -973,6 +1022,7 @@ class CameraSession(
                         },
                     )
                     .setResolutionSelector(resolutionSelector(photoAspect))
+                    .apply { usePhysicalCamera(physicalId) }
                     .build()
             } else {
                 null
@@ -985,6 +1035,7 @@ class CameraSession(
                     fps60 = attempt.videoExtras && key.videoFps60 && videoQuality in capabilities.fps60Qualities,
                     stabilization = attempt.videoExtras && key.videoStabilization && capabilities.videoStabilization,
                     mirror = key.mirrorFrontCamera,
+                    physicalId = physicalId,
                 )
                 else -> buildVideoCapture(
                     quality = VideoQualitySetting.FHD,
@@ -992,18 +1043,21 @@ class CameraSession(
                     fps60 = false,
                     stabilization = false,
                     mirror = key.mirrorFrontCamera,
+                    physicalId = physicalId,
                 )
             }
             val imageAnalysis = if (attempt.preRoll) {
                 // YUV for the encoder, at most 1080p; the default backpressure drops frames the encoder cannot take.
                 ImageAnalysis.Builder()
                     .setResolutionSelector(analysisResolution(photoAspect, preRollSize(photoAspect)))
+                    .apply { usePhysicalCamera(physicalId) }
                     .build()
             } else if (UseCaseKind.ANALYSIS in kinds) {
                 ImageAnalysis.Builder()
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setResolutionSelector(analysisResolution(photoAspect, analysisSize(key.mode)))
+                    .apply { usePhysicalCamera(physicalId) }
                     .build()
             } else {
                 null
@@ -1034,6 +1088,12 @@ class CameraSession(
             return
         }
         Log.e(TAG, "Binding use cases failed", lastError)
+        if (key.macro is MacroSetup.Lens) {
+            // The phone listed the close-focusing camera but will not open it for us: zoom the default one.
+            macroLensBroken = true
+            requestBind()
+            return
+        }
         fallBackOrFail(lastError)
     }
 
@@ -1101,6 +1161,7 @@ class CameraSession(
         livePhotoAvailable: Boolean,
     ) {
         val sameCamera = boundKey?.let { it.lensFacing == key.lensFacing && it.backCameraId == key.backCameraId } == true
+        val wasZoomedMacro = boundKey?.macro is MacroSetup.Zoomed
         zoomJob?.cancel()
         this.camera = bound
         this.preview = preview
@@ -1108,6 +1169,13 @@ class CameraSession(
         this.videoCapture = videoCapture
         this.boundKey = key
         requestedZoomRatio = bound.cameraInfo.zoomState.value?.zoomRatio ?: 1f
+        val macro = key.macro
+        bound.cameraInfo.zoomState.value?.let { zoom ->
+            when {
+                macro is MacroSetup.Zoomed -> applyZoom(bound, macro.zoomRatio.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio))
+                wasZoomedMacro -> applyZoom(bound, 1f.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio))
+            }
+        }
         applyTargetRotation()
         applyCameraControls()
         observeCamera(bound)
@@ -1288,6 +1356,14 @@ class CameraSession(
 
     @OptIn(ExperimentalCamera2Interop::class)
     private fun selectorFor(provider: ProcessCameraProvider, key: BindingKey): CameraSelector? {
+        val macro = key.macro
+        if (macro is MacroSetup.Lens) {
+            val byId = CameraSelector.Builder()
+                .addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == macro.cameraId } }
+                .build()
+            if (provider.hasCameraQuietly(byId)) return byId
+            macroLensBroken = true
+        }
         val backId = key.backCameraId
         if (backId != null) {
             val byId = CameraSelector.Builder()
@@ -1299,6 +1375,19 @@ class CameraSession(
         if (provider.hasCameraQuietly(preferred)) return preferred
         val other = selectorFor(if (key.lensFacing == LENS_FACING_BACK) LENS_FACING_FRONT else LENS_FACING_BACK)
         return other.takeIf { provider.hasCameraQuietly(it) }
+    }
+
+    /** The phone's cameras that CameraX can open (and the physical ones inside them); picks the Macro setup. */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun findLenses(provider: ProcessCameraProvider): List<LensInfo> {
+        val openable = provider.availableCameraInfos.map { Camera2CameraInfo.from(it).cameraId }.toSet()
+        val lenses = readLenses(app).filter { it.cameraId in openable }
+        val defaultBack = provider.availableCameraInfos.firstOrNull { it.lensFacing == CameraSelector.LENS_FACING_BACK }
+        if (defaultBack != null) {
+            macroSetup = chooseMacro(Camera2CameraInfo.from(defaultBack).cameraId, lenses)
+            Log.i(TAG, "Macro: $macroSetup")
+        }
+        return lenses
     }
 
     private fun selectorFor(lensFacing: Int) = CameraSelector.Builder().requireLensFacing(lensFacing).build()
@@ -1352,6 +1441,7 @@ class CameraSession(
         fps60: Boolean,
         stabilization: Boolean,
         mirror: Boolean,
+        physicalId: String? = null,
     ): VideoCapture<Recorder> {
         val recorder = Recorder.Builder()
             .setQualitySelector(
@@ -1366,7 +1456,14 @@ class CameraSession(
             .setMirrorMode(if (mirror) MirrorMode.MIRROR_MODE_ON_FRONT_ONLY else MirrorMode.MIRROR_MODE_OFF)
             .setVideoStabilizationEnabled(stabilization)
             .apply { if (fps60) setTargetFrameRate(android.util.Range(FPS_60, FPS_60)) }
+            .apply { usePhysicalCamera(physicalId) }
             .build()
+    }
+
+    /** Streams from [physicalId], a physical camera inside the bound logical one, when set. */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun <T> ExtendableBuilder<T>.usePhysicalCamera(physicalId: String?) {
+        if (physicalId != null) Camera2Interop.Extender(this).setPhysicalCameraId(physicalId)
     }
 
     private companion object {

@@ -97,4 +97,14 @@
     <string name="settings_portrait_resolution">Rozlišení portrétu</string>
     <string name="portrait_resolution_full">Plné</string>
     <string name="portrait_resolution_standard">Standardní (12 Mpx)</string>
+    <string name="macro">Makro</string>
+    <string name="settings_section_cameras">Fotoaparáty</string>
+    <string name="settings_cameras_summary">Co telefon aplikaci nabízí. Pošlete snímek obrazovky, když makro nebo zoom nefunguje.</string>
+    <string name="camera_back">zadní</string>
+    <string name="camera_front">přední</string>
+    <string name="camera_physical">fyzický %1$s v %2$s</string>
+    <string name="camera_focus_cm">ostří od %1$d cm</string>
+    <string name="camera_focus_fixed">pevné ostření</string>
+    <string name="macro_uses_lens">Makro: fotoaparát %1$s</string>
+    <string name="macro_uses_zoom">Makro: hlavní fotoaparát se zoomem %1$s</string>
 </resources>

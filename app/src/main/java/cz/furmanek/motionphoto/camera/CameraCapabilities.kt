@@ -32,6 +32,10 @@ data class CameraCapabilities(
     val sensorHeightMm: Float = 0f,
     /** The app can make portraits itself (on-device subject segmentation), for phones without the maker's bokeh. */
     val customPortrait: Boolean = false,
+    /** Every camera and physical camera the phone lists, for the settings' camera list. */
+    val lenses: List<LensInfo> = emptyList(),
+    /** How Macro works on this phone; null on the front camera. */
+    val macro: MacroSetup? = null,
 ) {
     val hasOptics: Boolean get() = focalMm > 0f && sensorWidthMm > 0f && sensorHeightMm > 0f
 }
