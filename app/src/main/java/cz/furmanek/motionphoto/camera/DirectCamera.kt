@@ -33,7 +33,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-class DirectCameraException(message: String, cause: Throwable? = null) : Exception(message, cause)
+/** [busy]: the phone said another camera is still open, so trying again shortly may work. */
+class DirectCameraException(message: String, cause: Throwable? = null, val busy: Boolean = false) : Exception(message, cause)
 
 /**
  * A back camera opened through Camera2 directly, for lenses the phone hides from its list (CameraX only binds
@@ -122,16 +123,18 @@ class DirectCamera(context: Context, val cameraId: String) {
 
                 override fun onDisconnected(camera: CameraDevice) {
                     camera.close()
-                    fail(opened, "camera $cameraId disconnected")
+                    fail(opened, "camera $cameraId disconnected", busy = true)
                 }
 
                 override fun onError(camera: CameraDevice, error: Int) {
                     camera.close()
-                    fail(opened, "camera $cameraId error $error")
+                    val busy = error == ERROR_CAMERA_IN_USE || error == ERROR_MAX_CAMERAS_IN_USE
+                    fail(opened, "camera $cameraId error $error", busy)
                 }
             })
         } catch (e: CameraAccessException) {
-            throw DirectCameraException("camera $cameraId not accessible: ${e.reason}", e)
+            val busy = e.reason == CameraAccessException.CAMERA_IN_USE || e.reason == CameraAccessException.MAX_CAMERAS_IN_USE
+            throw DirectCameraException("camera $cameraId not accessible: ${e.reason}", e, busy)
         } catch (e: SecurityException) {
             throw DirectCameraException("camera $cameraId refused", e)
         } catch (e: IllegalArgumentException) {
@@ -147,9 +150,9 @@ class DirectCamera(context: Context, val cameraId: String) {
     }
 
     /** Before opening, a failure fails the open; after, it marks the camera as failed. */
-    private fun fail(opened: CompletableDeferred<CameraDevice>, message: String) {
+    private fun fail(opened: CompletableDeferred<CameraDevice>, message: String, busy: Boolean = false) {
         Log.w(TAG, message)
-        if (!opened.completeExceptionally(DirectCameraException(message))) _failed.value = true
+        if (!opened.completeExceptionally(DirectCameraException(message, busy = busy))) _failed.value = true
     }
 
     private suspend fun configure(camera: CameraDevice, surfaces: List<Surface>): CameraCaptureSession {

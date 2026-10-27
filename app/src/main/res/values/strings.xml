@@ -120,5 +120,5 @@
     <string name="probe_stage_configuring">spouštím stream…</string>
     <string name="probe_stage_frame">čekám na snímek…</string>
     <string name="probe_stage_closing">zavírám…</string>
-    <string name="hidden_camera_failed">Skrytý fotoaparát nefunguje, používám hlavní.</string>
+    <string name="hidden_camera_failed">Skrytý fotoaparát nefunguje (%1$s), používám hlavní.</string>
 </resources>

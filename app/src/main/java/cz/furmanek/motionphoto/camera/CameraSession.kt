@@ -307,6 +307,9 @@ class CameraSession(
     private var directTextureUsed: SurfaceTexture? = null
     private var directJob: Job? = null
 
+    /** The CameraX camera just let go of; the hidden one opens only once it has closed. */
+    private var closingCamera: Camera? = null
+
     /** Where the hidden camera's preview sits in the preview box, for taps: left, top, width, height. */
     private var directBounds = floatArrayOf(0f, 0f, 0f, 0f)
 
@@ -544,18 +547,22 @@ class CameraSession(
         val texture = directTexture ?: return true
         _state.update { it.copy(status = SessionStatus.OPENING) }
         directJob = scope.launch {
-            val camera = try {
-                DirectCamera(app, id)
-            } catch (e: DirectCameraException) {
-                directFailed(e)
-                return@launch
+            // The phone allows one open camera: CameraX closes its own on its own thread, and opening before that
+            // reads as busy.
+            val closing = closingCamera
+            withTimeoutOrNull(CAMERA_CLOSE_WAIT_MS) {
+                closing?.cameraInfo?.cameraState?.asFlow()?.first { it.type == CameraState.Type.CLOSED }
             }
-            directCamera = camera
-            try {
-                texture.setDefaultBufferSize(camera.previewSize.width, camera.previewSize.height)
-                camera.open(Surface(texture))
-            } catch (e: CancellationException) {
-                throw e
+            if (closingCamera === closing) closingCamera = null
+            val camera = try {
+                try {
+                    openDirect(id, texture)
+                } catch (e: DirectCameraException) {
+                    if (!e.busy) throw e
+                    Log.w(TAG, "Hidden camera $id busy; trying again", e)
+                    delay(DIRECT_RETRY_DELAY_MS)
+                    openDirect(id, texture)
+                }
             } catch (e: DirectCameraException) {
                 directFailed(e)
                 return@launch
@@ -565,6 +572,22 @@ class CameraSession(
             directFailed(DirectCameraException("camera $id lost"))
         }
         return true
+    }
+
+    /** Opens the hidden camera [id] into [texture]; the camera is kept in [directCamera] so a close reaches it. */
+    private suspend fun openDirect(id: String, texture: SurfaceTexture): DirectCamera {
+        directCamera?.close()
+        val camera = DirectCamera(app, id)
+        directCamera = camera
+        try {
+            texture.setDefaultBufferSize(camera.previewSize.width, camera.previewSize.height)
+            camera.open(Surface(texture))
+        } catch (e: DirectCameraException) {
+            camera.close()
+            if (directCamera === camera) directCamera = null
+            throw e
+        }
+        return camera
     }
 
     /** The chip's zoom while the hidden camera shows at [zoom] of its own. */
@@ -590,6 +613,7 @@ class CameraSession(
         // Its zoom and state would otherwise keep overwriting what the hidden camera shows.
         cameraObservers?.cancel()
         cameraObservers = null
+        camera?.let { closingCamera = it }
         stopPortraitPreview()
         stopPreRoll()
         provider?.unbindAll()
@@ -608,7 +632,7 @@ class CameraSession(
         _state.update { state ->
             state.copy(direct = null, capabilities = state.capabilities?.copy(ultraWideZoom = null))
         }
-        _events.tryEmit(SessionEvent.CaptureFailed(app.getString(R.string.hidden_camera_failed)))
+        _events.tryEmit(SessionEvent.CaptureFailed(app.getString(R.string.hidden_camera_failed, error.message.orEmpty())))
         requestBind()
     }
 
@@ -1763,6 +1787,7 @@ class CameraSession(
         const val FPS_60 = 60
         const val PROBE_LIMIT_MS = 15_000L
         const val TEMP_DIRECT_PREFIX = "direct_"
+        const val DIRECT_RETRY_DELAY_MS = 1_500L
         const val CAMERA_CLOSE_WAIT_MS = 3_000L
         const val PROBE_RETRY_DELAY_MS = 1_500L
         const val COUNTDOWN_STEP_MS = 1_000L
