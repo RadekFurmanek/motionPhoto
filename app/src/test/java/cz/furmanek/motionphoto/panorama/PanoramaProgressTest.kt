@@ -45,6 +45,22 @@ class PanoramaProgressTest {
     }
 
     @Test
+    fun `direction is unknown until the first move of half a step`() {
+        val right = PanoramaProgress(stepDeg = 20f)
+        right.onYaw(0f)
+        right.onYaw(5f)
+        assertEquals(0, right.direction)
+        right.onYaw(10f)
+        assertEquals(1, right.direction)
+
+        // Left across ±180°: from −175° to 175° is 10° to the left.
+        val left = PanoramaProgress(stepDeg = 20f)
+        left.onYaw(-175f)
+        left.onYaw(175f)
+        assertEquals(-1, left.direction)
+    }
+
+    @Test
     fun `finishes near a full turn`() {
         val progress = PanoramaProgress(stepDeg = 20f)
         var yaw = 0f

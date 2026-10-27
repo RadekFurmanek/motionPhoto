@@ -19,8 +19,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 /** One kept frame: upright, at most 960 px tall, with the compass heading it was taken at. */
 class PanoramaFrame(val image: Raster, val yawDeg: Float)
 
-/** What the capture shows while it runs. [frames] counts the frames kept so far. */
-data class PanoramaStatus(val frames: Int, val sweptDeg: Float, val level: Boolean, val yawToNextDeg: Float)
+/** What the capture shows while it runs. [frames] counts the frames kept so far; [direction] as in [PanoramaProgress]. */
+data class PanoramaStatus(val frames: Int, val sweptDeg: Float, val level: Boolean, val yawToNextDeg: Float, val direction: Int)
 
 /**
  * Takes panorama frames: the compass decides when ([PanoramaProgress]) and the next analysis frame after that
@@ -38,7 +38,7 @@ class PanoramaCapture(private val context: Context) {
     @Volatile private var frameWanted = false
     @Volatile private var latestYaw = 0f
 
-    /** Without a rotation vector sensor there is nothing to time the frames by. */
+    /** Without a (game) rotation vector sensor there is nothing to time the frames by. */
     val available: Boolean get() = sensor.available
 
     /**
@@ -58,7 +58,7 @@ class PanoramaCapture(private val context: Context) {
         var finishReported = false
         fun report() {
             if (stopped) return
-            onChange(PanoramaStatus(synchronized(frames) { frames.size }, progress.sweptDeg, level, progress.degreesToNext()))
+            onChange(PanoramaStatus(synchronized(frames) { frames.size }, progress.sweptDeg, level, progress.degreesToNext(), progress.direction))
         }
 
         analysis.setAnalyzer(worker) { image ->

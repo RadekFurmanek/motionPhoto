@@ -194,6 +194,8 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 .fillMaxSize()
                 .pointerInput(viewModel) {
                     detectTapGestures { offset ->
+                        // Re-metering during a panorama would show in the stitched result.
+                        if (state.panorama != null) return@detectTapGestures
                         focusPoint = offset
                         focusTapCount++
                         exposureVisible = true
@@ -261,7 +263,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 .padding(bottom = 16.dp),
             viewModel = viewModel,
             exposureSlider = {
-                if (exposureVisible && canAdjustExposure) {
+                if (exposureVisible && canAdjustExposure && state.panorama == null) {
                     ExposureSlider(
                         index = state.exposureIndex,
                         range = exposureRange,

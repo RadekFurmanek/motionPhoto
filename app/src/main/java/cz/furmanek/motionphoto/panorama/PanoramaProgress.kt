@@ -12,7 +12,9 @@ class PanoramaProgress(private val stepDeg: Float, private val maxDeg: Float = 3
     private var lastYaw: Float? = null
     private var turned = 0f
     private var lastCapturedAt = 0f
-    private var direction = 0f
+    /** The sweep direction: 1 to the right (heading rising), −1 to the left, 0 until the first move sets it. */
+    var direction = 0
+        private set
 
     var capturedCount = 0
         private set
@@ -32,8 +34,8 @@ class PanoramaProgress(private val stepDeg: Float, private val maxDeg: Float = 3
             return true
         }
         turned += wrapDegrees(yawDeg - previous)
-        if (direction == 0f && abs(turned) >= stepDeg / 2) direction = sign(turned)
-        if (direction == 0f) return false
+        if (direction == 0 && abs(turned) >= stepDeg / 2) direction = sign(turned).toInt()
+        if (direction == 0) return false
         sweptDeg = maxOf(sweptDeg, turned * direction)
         if ((turned - lastCapturedAt) * direction < stepDeg) return false
         lastCapturedAt = turned
@@ -42,7 +44,7 @@ class PanoramaProgress(private val stepDeg: Float, private val maxDeg: Float = 3
     }
 
     /** The heading change to the next frame, for the on-screen target; positive in the turning direction. */
-    fun degreesToNext(): Float = if (direction == 0f) stepDeg else stepDeg - (turned - lastCapturedAt) * direction
+    fun degreesToNext(): Float = if (direction == 0) stepDeg else stepDeg - (turned - lastCapturedAt) * direction
 }
 
 /** A heading difference brought into −180..180. */

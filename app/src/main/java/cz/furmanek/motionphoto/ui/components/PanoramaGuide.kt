@@ -35,9 +35,9 @@ private val TARGET_DP_PER_DEGREE = 6.dp
 
 /**
  * The panorama guide in the middle of the preview: a level line, a fixed aiming ring in the middle and the target
- * ring, [PanoramaUiState.yawToNextDeg] away in the direction of the sweep. Aiming the middle ring into the target
- * takes the next frame. Below it the frames taken and the degrees swept; the line, the middle ring and a hint turn
- * red while the phone is tilted.
+ * dot, [PanoramaUiState.yawToNextDeg] away in the direction of the sweep. Aiming the middle ring onto the target
+ * dot takes the next frame. Below it the frames taken and the degrees swept; the line, the middle ring and a hint
+ * turn red while the phone is tilted.
  */
 @Composable
 fun PanoramaGuide(panorama: PanoramaUiState, modifier: Modifier = Modifier) {
@@ -53,9 +53,12 @@ fun PanoramaGuide(panorama: PanoramaUiState, modifier: Modifier = Modifier) {
                 strokeWidth = 2.dp.toPx(),
             )
             drawCircle(color = lineColor, radius = ringRadius, center = center, style = Stroke(width = 2.dp.toPx()))
-            // The sweep is drawn left to right; turning the other way the target still closes in on the middle.
-            val maxOffset = size.width / 2 - ringRadius * 2
-            val offset = (panorama.yawToNextDeg.coerceAtLeast(0f) * TARGET_DP_PER_DEGREE.toPx()).coerceAtMost(maxOffset)
+            val offset = targetOffsetPx(
+                yawToNextDeg = panorama.yawToNextDeg,
+                direction = panorama.direction,
+                pxPerDegree = TARGET_DP_PER_DEGREE.toPx(),
+                maxOffsetPx = size.width / 2 - ringRadius * 2,
+            )
             drawCircle(
                 color = TargetYellow,
                 radius = ringRadius * 0.6f,
@@ -89,6 +92,15 @@ fun PanoramaGuide(panorama: PanoramaUiState, modifier: Modifier = Modifier) {
             )
         }
     }
+}
+
+/**
+ * Horizontal offset of the target dot from the middle: [yawToNextDeg] scaled and capped at [maxOffsetPx], on the
+ * side of the sweep [direction]. Before the first move (0) it sits on the right.
+ */
+internal fun targetOffsetPx(yawToNextDeg: Float, direction: Int, pxPerDegree: Float, maxOffsetPx: Float): Float {
+    val offset = (yawToNextDeg.coerceAtLeast(0f) * pxPerDegree).coerceIn(0f, maxOffsetPx.coerceAtLeast(0f))
+    return if (direction < 0) -offset else offset
 }
 
 /** Shown while a finished panorama is stitched: [progress] is 0..1. */

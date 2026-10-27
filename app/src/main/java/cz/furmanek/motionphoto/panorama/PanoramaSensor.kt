@@ -6,11 +6,15 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 
-/** Compass heading and forward tilt of an upright phone, from the rotation-vector sensor. */
+/**
+ * Heading and forward tilt of an upright phone. Prefers the game rotation vector (gyro and accelerometer): a
+ * panorama needs only relative heading, and the magnetometer's pull toward north makes the heading jump indoors.
+ */
 class PanoramaSensor(context: Context) {
 
     private val manager = context.getSystemService(SensorManager::class.java)
-    private val sensor: Sensor? = manager?.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+    private val sensor: Sensor? = manager?.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+        ?: manager?.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
     private var listener: SensorEventListener? = null
 
     val available: Boolean get() = sensor != null

@@ -105,6 +105,8 @@ data class PanoramaUiState(
     val level: Boolean = true,
     /** Degrees to turn on to the next frame; positive in the turning direction. */
     val yawToNextDeg: Float = 0f,
+    /** 1 sweeping right, −1 left, 0 before the first move. */
+    val direction: Int = 0,
     val stitchingProgress: Float? = null,
 )
 
@@ -328,6 +330,8 @@ class CameraSession(
     }
 
     fun focusAt(x: Float, y: Float) {
+        // Re-metering mid-sweep shows as a brightness band and refocusing changes the scale.
+        if (_state.value.panorama != null) return
         val camera = camera ?: return
         val factory = target?.meteringFactory ?: return
         val action = FocusMeteringAction.Builder(
@@ -342,6 +346,7 @@ class CameraSession(
     }
 
     fun setExposureIndex(index: Int) {
+        if (_state.value.panorama != null) return
         val camera = camera ?: return
         val range = _state.value.capabilities?.exposureRange ?: return
         val clamped = index.coerceIn(range)
@@ -536,7 +541,13 @@ class CameraSession(
     }
 
     /** Lens geometry for one panorama, fixed when it starts. */
-    private class PanoramaOptics(val focalMm: Float, val sensorMm: Float, val startedAtMillis: Long)
+    private class PanoramaOptics(
+        val focalMm: Float,
+        val sensorMm: Float,
+        val fovDeg: Float,
+        val stepDeg: Float,
+        val startedAtMillis: Long,
+    )
 
     private var panoramaOptics: PanoramaOptics? = null
 
@@ -561,7 +572,7 @@ class CameraSession(
         val focalMm = capabilities.focalMm * zoomRatio
         val fovDeg = Math.toDegrees(2 * atan(sensorMm / (2.0 * focalMm))).toFloat()
         val stepDeg = fovDeg / PANORAMA_STEPS_PER_FOV
-        val optics = PanoramaOptics(focalMm, sensorMm, System.currentTimeMillis())
+        val optics = PanoramaOptics(focalMm, sensorMm, fovDeg, stepDeg, System.currentTimeMillis())
         panoramaOptics = optics
         _state.update { it.copy(panorama = PanoramaUiState(capturing = true, yawToNextDeg = stepDeg)) }
         zoomJob?.cancel()
@@ -584,6 +595,7 @@ class CameraSession(
                     sweptDeg = status.sweptDeg,
                     level = status.level,
                     yawToNextDeg = status.yawToNextDeg,
+                    direction = status.direction,
                 ),
             )
         }
@@ -606,6 +618,12 @@ class CameraSession(
                 }
                 val jpeg = withContext(Dispatchers.Default) {
                     val focalPx = focalLengthPx(optics.focalMm, optics.sensorMm, frames.first().image.width)
+                    // The focal length is the first one the lens lists; this lets a phone test check it.
+                    Log.i(
+                        TAG,
+                        "Panorama optics: focalMm=${optics.focalMm} sensorMm=${optics.sensorMm} fovDeg=${optics.fovDeg} " +
+                            "stepDeg=${optics.stepDeg} focalPx=$focalPx",
+                    )
                     stitchPanorama(frames, focalPx) { progress ->
                         _state.update { it.copy(panorama = it.panorama?.copy(stitchingProgress = progress)) }
                     }.toJpeg(PANORAMA_JPEG_QUALITY)
