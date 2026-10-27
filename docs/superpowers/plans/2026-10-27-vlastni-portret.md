@@ -189,6 +189,40 @@
   - Plynulost: z logcatu nebo časů snímků doložit ≥ 15 snímků/s náhledu.
 - [ ] **Step 4: Commit**: `feat: live portrait preview`
 
+### Task 4b: Nastavitelné rozostření podržením (požadavek uživatele z 2026-10-27)
+
+Uživatel na telefonu potvrdil, že portrét funguje, ale rozmazání bylo moc silné. Chce sílu nastavovat přímo při focení: v PORTRÉTU **podržením prstu na náhledu** se objeví posuvník **Rozostření** ve stylu posuvníku jasu (`ui/components/ExposureSlider.kt`). Jas zůstává na ťuknutí.
+
+**Files:**
+- Modify: `settings/CameraSettings.kt` (+ `portraitBlur: Float = PORTRAIT_BLUR_DEFAULT`), `settings/SettingsRepository.kt`, `portrait/PortraitMath.kt`, `portrait/PortraitProcessor.kt`, `portrait/PortraitPreview.kt`, `camera/CameraSession.kt`, `ui/CameraScreen.kt`, `res/values/strings.xml`
+- Create: `ui/components/BlurSlider.kt` (nebo zobecnit `ExposureSlider`, pokud to jde bez změny jeho chování)
+- Test: `portrait/PortraitMathTest.kt`, `settings/SettingsRepositoryTest.kt`
+
+**Interfaces:**
+- `PortraitMath.kt`:
+  - `const val PORTRAIT_BLUR_MIN = 0.004f`, `PORTRAIT_BLUR_MAX = 0.03f`, `PORTRAIT_BLUR_DEFAULT = 0.012f`. Hodnoty jsou podíl delší strany obrazu.
+  - `fun clampBlur(fraction: Float): Float`
+- Procesor i náhled berou podíl jako parametr místo pevné konstanty `BACKGROUND_BLUR`:
+  - `PortraitProcessor.process(jpeg, resolution, blurFraction)`;
+  - náhled čte aktuální hodnotu při každém snímku.
+- `CameraSession.setPortraitBlur(fraction: Float)`: uloží do nastavení, náhled reaguje okamžitě.
+- **UI:**
+  - Gesto `onLongPress` na náhledu jen v PORTRÉTU s vlastním portrétem. U portrétu výrobce nic.
+  - Posuvník zmizí po stejné době nečinnosti jako posuvník jasu.
+  - Během zpracování fotky a během panoramatu se nezobrazí.
+  - Popisek: `portrait_blur` „Rozostření“.
+
+- [ ] **Step 1: Testy:**
+  - `clampBlur(0f) == 0.004f`, `clampBlur(1f) == 0.03f`, `clampBlur(0.012f) == 0.012f`;
+  - `SettingsRepositoryTest` round-trip `portraitBlur = 0.02f`;
+  - výchozí hodnota je `0.012f`.
+- [ ] **Step 2:** FAIL, **Step 3:** implementuj, **Step 4:** `./gradlew -q :app:testDebugUnitTest :app:lintDebug :app:assembleRelease` → PASS.
+- [ ] **Step 5: Emulátor** (release build, ML Kit tam segmentaci neumí):
+  - podržení v PORTRÉTU ukáže posuvník a ťuknutí dál ukáže jas;
+  - hodnota přežije restart aplikace;
+  - v ostatních režimech podržení nic nedělá.
+- [ ] **Step 6: Commit**: `feat: adjustable portrait blur`
+
 ### Task 5: Vydání 0.6.0
 
 - [ ] **Step 1:** `versionCode = 7`, `versionName = "0.6.0"`. Testy, lint, `assembleRelease`, podpis stejný jako 0.5.1.
