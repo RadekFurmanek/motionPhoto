@@ -24,7 +24,8 @@ private const val HIGHEST_PROBED_ID = 15
 /**
  * A camera the phone lists: [cameraId] is what CameraX binds; [physicalId] a physical camera inside it (null for
  * the camera itself). [minFocusDiopters] is 1 / the closest focus in metres, 0 for fixed focus. A [hidden] camera is
- * missing from the phone's list but answered when asked by id; CameraX cannot open it.
+ * missing from the phone's list but answered when asked by id; CameraX cannot open it, the app opens it through
+ * Camera2 itself. [sensorWidthMm] (0 when unknown) and [focalMm] give the field of view.
  */
 data class LensInfo(
     val cameraId: String,
@@ -33,6 +34,8 @@ data class LensInfo(
     val focalMm: Float,
     val minFocusDiopters: Float,
     val hidden: Boolean = false,
+    val sensorWidthMm: Float = 0f,
+    val sensorOrientation: Int = 90,
 )
 
 /** How Macro is done on this phone. */
@@ -40,18 +43,25 @@ sealed interface MacroSetup {
     /** A camera that focuses much closer than the default one. */
     data class Lens(val cameraId: String, val physicalId: String?) : MacroSetup
 
+    /** A close-focusing camera hidden from the phone's list, opened through Camera2 instead of CameraX. */
+    data class Hidden(val cameraId: String) : MacroSetup
+
     /** No such camera: the default one, zoomed in so a small subject fills the frame from its closest focus. */
     data class Zoomed(val zoomRatio: Float) : MacroSetup
 }
 
-/** The back lens that focuses closest, if it beats the default camera [defaultCameraId] clearly; else a zoom. */
+/**
+ * The back lens that focuses closest, if it beats the default camera [defaultCameraId] clearly (a hidden one is
+ * opened through Camera2); else a zoom.
+ */
 fun chooseMacro(defaultCameraId: String?, lenses: List<LensInfo>): MacroSetup {
     val defaultDiopters = lenses.firstOrNull { it.cameraId == defaultCameraId && it.physicalId == null }?.minFocusDiopters ?: 0f
-    val best = lenses.filter { it.back && !it.hidden }.maxByOrNull { it.minFocusDiopters }
-    return if (best != null && best.minFocusDiopters >= MIN_MACRO_DIOPTERS && best.minFocusDiopters >= defaultDiopters * CLOSER_THAN_DEFAULT) {
-        MacroSetup.Lens(best.cameraId, best.physicalId)
-    } else {
-        MacroSetup.Zoomed(MACRO_ZOOM)
+    val best = lenses.filter { it.back }.maxByOrNull { it.minFocusDiopters }
+    return when {
+        best == null || best.minFocusDiopters < MIN_MACRO_DIOPTERS || best.minFocusDiopters < defaultDiopters * CLOSER_THAN_DEFAULT ->
+            MacroSetup.Zoomed(MACRO_ZOOM)
+        best.hidden -> MacroSetup.Hidden(best.cameraId)
+        else -> MacroSetup.Lens(best.cameraId, best.physicalId)
     }
 }
 
@@ -108,4 +118,6 @@ private fun lensInfo(cameraId: String, physicalId: String?, back: Boolean, chara
     back = back,
     focalMm = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f,
     minFocusDiopters = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
+    sensorWidthMm = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.width ?: 0f,
+    sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90,
 )

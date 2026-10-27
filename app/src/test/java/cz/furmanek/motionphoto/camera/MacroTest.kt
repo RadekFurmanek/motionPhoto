@@ -51,9 +51,9 @@ class MacroTest {
     }
 
     @Test
-    fun hiddenLensIsNeverMacro() {
-        val lenses = listOf(lens("0", diopters = 10f), lens("2", diopters = 30f).copy(hidden = true))
-        assertEquals(MacroSetup.Zoomed(MACRO_ZOOM), chooseMacro("0", lenses))
+    fun hiddenLensBecomesHiddenMacro() {
+        val lenses = listOf(lens("0", diopters = 10f), lens("2", diopters = 25f).copy(hidden = true))
+        assertEquals(MacroSetup.Hidden("2"), chooseMacro("0", lenses))
     }
 
     @Test

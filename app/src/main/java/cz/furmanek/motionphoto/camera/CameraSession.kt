@@ -465,7 +465,12 @@ class CameraSession(
     private fun activeMacro(): MacroSetup? {
         if (!macroOn || settings.mode != CaptureMode.PHOTO || settings.lensFacing != LENS_FACING_BACK) return null
         val setup = macroSetup ?: return null
-        return if (setup is MacroSetup.Lens && macroLensBroken) MacroSetup.Zoomed(MACRO_ZOOM) else setup
+        return when {
+            setup is MacroSetup.Lens && macroLensBroken -> MacroSetup.Zoomed(MACRO_ZOOM)
+            // Not bound through CameraX; until the direct path takes it, Macro zooms.
+            setup is MacroSetup.Hidden -> MacroSetup.Zoomed(MACRO_ZOOM)
+            else -> setup
+        }
     }
 
     /** Glides to [ratio] (a zoom preset), one zoom step per frame. */
