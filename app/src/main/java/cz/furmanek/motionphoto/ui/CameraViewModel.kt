@@ -39,6 +39,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setPortraitBlur(fraction: Float) = session.setPortraitBlur(fraction)
 
+    fun persistPortraitBlur() = session.persistPortraitBlur()
+
     fun attachPreview(
         surfaceProvider: Preview.SurfaceProvider,
         displayRotation: Int,

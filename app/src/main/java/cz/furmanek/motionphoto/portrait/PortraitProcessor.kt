@@ -148,7 +148,7 @@ class PortraitProcessor(private val masker: SubjectMasker) {
         }
     }
 
-    /** Carries orientation, capture time and location over from [original] to the re-encoded [target]. */
+    /** Carries orientation, camera and exposure data, capture time and location over from [original] to the re-encoded [target]. */
     private fun copyExif(original: File, target: File) {
         val source = ExifInterface(original)
         val dest = ExifInterface(target)
@@ -165,8 +165,23 @@ class PortraitProcessor(private val masker: SubjectMasker) {
         const val STRIP_ROWS = 64
         const val JPEG_QUALITY = 95
 
+        // Not the dimensions (the re-encoded pixels have their own) and not the EXIF thumbnail, which would show the
+        // unblurred original.
         val EXIF_TAGS = listOf(
             ExifInterface.TAG_ORIENTATION,
+            ExifInterface.TAG_MAKE,
+            ExifInterface.TAG_MODEL,
+            ExifInterface.TAG_LENS_MAKE,
+            ExifInterface.TAG_LENS_MODEL,
+            ExifInterface.TAG_F_NUMBER,
+            ExifInterface.TAG_EXPOSURE_TIME,
+            ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY,
+            ExifInterface.TAG_FOCAL_LENGTH,
+            ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
+            ExifInterface.TAG_FLASH,
+            ExifInterface.TAG_WHITE_BALANCE,
+            ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
+            ExifInterface.TAG_METERING_MODE,
             ExifInterface.TAG_DATETIME,
             ExifInterface.TAG_DATETIME_ORIGINAL,
             ExifInterface.TAG_DATETIME_DIGITIZED,

@@ -11,6 +11,7 @@ import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import kotlinx.coroutines.tasks.await
 import java.io.Closeable
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Foreground confidence (0..1) per pixel, row by row. */
 class Mask(val width: Int, val height: Int, val confidence: FloatArray)
@@ -37,11 +38,22 @@ class MlKitSubjectMasker(context: Context) : SubjectMasker, Closeable {
     override val available: Boolean
         get() = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(appContext) == ConnectionResult.SUCCESS
 
+    /** Once the model is installed it stays, so later calls skip the Play services checks. */
+    @Volatile
+    private var modelReady = false
+    private val installRequested = AtomicBoolean(false)
+
     override suspend fun ensureModel(): Boolean {
+        if (modelReady) return true
         if (!available) return false
-        if (moduleInstall.areModulesAvailable(segmenter).await().areModulesAvailable()) return true
-        // Fire and forget: the photo being taken now stays ordinary, later ones get the portrait.
-        moduleInstall.installModules(ModuleInstallRequest.newBuilder().addApi(segmenter).build())
+        if (moduleInstall.areModulesAvailable(segmenter).await().areModulesAvailable()) {
+            modelReady = true
+            return true
+        }
+        // Fire and forget, once per process: the photo being taken now stays ordinary, later ones get the portrait.
+        if (installRequested.compareAndSet(false, true)) {
+            moduleInstall.installModules(ModuleInstallRequest.newBuilder().addApi(segmenter).build())
+        }
         return false
     }
 

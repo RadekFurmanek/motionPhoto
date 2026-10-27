@@ -191,6 +191,8 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
         delay(EXPOSURE_SLIDER_VISIBLE_MS)
         blurVisible = false
     }
+    // Coming back to PORTRÉT quickly must not find the slider still open.
+    LaunchedEffect(settings.mode) { blurVisible = false }
     val customPortrait = capabilities != null && usesCustomPortrait(settings.mode, capabilities)
     val canAdjustBlur = customPortrait && !state.busy && state.panorama == null
     val exposureRange = capabilities?.exposureRange
@@ -297,6 +299,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                     BlurSlider(
                         fraction = blur,
                         onChange = viewModel::setPortraitBlur,
+                        onChangeFinished = viewModel::persistPortraitBlur,
                         onInteraction = { blurInteraction++ },
                     )
                 } else if (exposureVisible && canAdjustExposure && state.panorama == null) {

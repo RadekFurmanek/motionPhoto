@@ -210,7 +210,7 @@ class CameraSession(
 
     /**
      * The custom portrait's background blur: set at once by [setPortraitBlur], so the live preview follows the
-     * slider without waiting for the settings store, which follows behind.
+     * slider without waiting for the settings store, which [persistPortraitBlur] updates when the slider is let go.
      */
     private val _portraitBlur = MutableStateFlow(CameraSettings().portraitBlur)
     val portraitBlur: StateFlow<Float> = _portraitBlur.asStateFlow()
@@ -281,7 +281,7 @@ class CameraSession(
                 if (_state.value.panorama?.capturing == true && endsPanorama(settings, new)) cancelPanorama()
                 settings = new
                 settingsLoaded = true
-                // While the slider's writes are still landing, older values must not pull it back.
+                // While the slider's write is still landing, the older value must not pull it back.
                 if (portraitBlurWrite?.isActive != true) _portraitBlur.value = new.portraitBlur
                 applyCameraControls()
                 requestBind()
@@ -402,11 +402,14 @@ class CameraSession(
 
     /** The custom portrait's background blur, a fraction of the longer side; the live preview follows at once. */
     fun setPortraitBlur(fraction: Float) {
-        val clamped = clampBlur(fraction)
-        _portraitBlur.value = clamped
-        // Only the latest value matters: a write not yet started is dropped for the newer one.
+        _portraitBlur.value = clampBlur(fraction)
+    }
+
+    /** Stores the blur once the slider is let go; every move would rewrite the settings and rerun the camera controls. */
+    fun persistPortraitBlur() {
+        val blur = _portraitBlur.value
         portraitBlurWrite?.cancel()
-        portraitBlurWrite = scope.launch { settingsRepository.update { it.copy(portraitBlur = clamped) } }
+        portraitBlurWrite = scope.launch { settingsRepository.update { it.copy(portraitBlur = blur) } }
     }
 
     /** Orientation photos and videos are saved in, as a [Surface] rotation; held while a capture runs. */

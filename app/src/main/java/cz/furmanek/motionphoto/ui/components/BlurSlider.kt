@@ -27,6 +27,7 @@ import cz.furmanek.motionphoto.portrait.PORTRAIT_BLUR_MIN
 fun BlurSlider(
     fraction: Float,
     onChange: (Float) -> Unit,
+    onChangeFinished: () -> Unit,
     onInteraction: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -45,6 +46,7 @@ fun BlurSlider(
                 onInteraction()
                 onChange(it)
             },
+            onValueChangeFinished = onChangeFinished,
             valueRange = PORTRAIT_BLUR_MIN..PORTRAIT_BLUR_MAX,
             colors = SliderDefaults.colors(thumbColor = Color(0xFFFFD54F), activeTrackColor = Color(0xFFFFD54F)),
             modifier = Modifier.width(220.dp),
