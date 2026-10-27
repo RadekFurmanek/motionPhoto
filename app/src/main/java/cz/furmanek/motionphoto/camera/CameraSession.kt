@@ -1381,7 +1381,8 @@ class CameraSession(
     @OptIn(ExperimentalCamera2Interop::class)
     private fun findLenses(provider: ProcessCameraProvider): List<LensInfo> {
         val openable = provider.availableCameraInfos.map { Camera2CameraInfo.from(it).cameraId }.toSet()
-        val lenses = readLenses(app).filter { it.cameraId in openable }
+        // Hidden cameras stay in the list for the settings; chooseMacro skips them.
+        val lenses = readLenses(app).filter { it.hidden || it.cameraId in openable }
         val defaultBack = provider.availableCameraInfos.firstOrNull { it.lensFacing == CameraSelector.LENS_FACING_BACK }
         if (defaultBack != null) {
             macroSetup = chooseMacro(Camera2CameraInfo.from(defaultBack).cameraId, lenses)

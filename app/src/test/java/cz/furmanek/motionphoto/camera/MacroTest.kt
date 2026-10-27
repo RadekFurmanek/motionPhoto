@@ -49,4 +49,15 @@ class MacroTest {
         assertEquals(10, minFocusCm(10f))
         assertEquals(null, minFocusCm(0f))
     }
+
+    @Test
+    fun hiddenLensIsNeverMacro() {
+        val lenses = listOf(lens("0", diopters = 10f), lens("2", diopters = 30f).copy(hidden = true))
+        assertEquals(MacroSetup.Zoomed(MACRO_ZOOM), chooseMacro("0", lenses))
+    }
+
+    @Test
+    fun probedIdsSkipListedOnes() {
+        assertEquals(listOf("2", "3", "4"), hiddenCandidateIds(listOf("0", "1"), upTo = 4))
+    }
 }

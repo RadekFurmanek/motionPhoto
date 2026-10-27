@@ -18,9 +18,13 @@ private const val CLOSER_THAN_DEFAULT = 1.5f
 
 private const val TAG = "Macro"
 
+/** Camera ids tried directly beyond the listed ones: some makers hide lenses from the list but still answer. */
+private const val HIGHEST_PROBED_ID = 15
+
 /**
  * A camera the phone lists: [cameraId] is what CameraX binds; [physicalId] a physical camera inside it (null for
- * the camera itself). [minFocusDiopters] is 1 / the closest focus in metres, 0 for fixed focus.
+ * the camera itself). [minFocusDiopters] is 1 / the closest focus in metres, 0 for fixed focus. A [hidden] camera is
+ * missing from the phone's list but answered when asked by id; CameraX cannot open it.
  */
 data class LensInfo(
     val cameraId: String,
@@ -28,6 +32,7 @@ data class LensInfo(
     val back: Boolean,
     val focalMm: Float,
     val minFocusDiopters: Float,
+    val hidden: Boolean = false,
 )
 
 /** How Macro is done on this phone. */
@@ -42,7 +47,7 @@ sealed interface MacroSetup {
 /** The back lens that focuses closest, if it beats the default camera [defaultCameraId] clearly; else a zoom. */
 fun chooseMacro(defaultCameraId: String?, lenses: List<LensInfo>): MacroSetup {
     val defaultDiopters = lenses.firstOrNull { it.cameraId == defaultCameraId && it.physicalId == null }?.minFocusDiopters ?: 0f
-    val best = lenses.filter { it.back }.maxByOrNull { it.minFocusDiopters }
+    val best = lenses.filter { it.back && !it.hidden }.maxByOrNull { it.minFocusDiopters }
     return if (best != null && best.minFocusDiopters >= MIN_MACRO_DIOPTERS && best.minFocusDiopters >= defaultDiopters * CLOSER_THAN_DEFAULT) {
         MacroSetup.Lens(best.cameraId, best.physicalId)
     } else {
@@ -53,11 +58,19 @@ fun chooseMacro(defaultCameraId: String?, lenses: List<LensInfo>): MacroSetup {
 /** The closest focus in whole centimetres, null for fixed focus. */
 fun minFocusCm(diopters: Float): Int? = if (diopters > 0f) (100f / diopters).roundToInt() else null
 
-/** Every camera the phone lists and the physical cameras inside each, read once from Camera2. */
+/** Numeric ids up to [upTo] that are not in [listed]: where a hidden camera may still answer. */
+fun hiddenCandidateIds(listed: List<String>, upTo: Int = HIGHEST_PROBED_ID): List<String> =
+    (0..upTo).map(Int::toString).filter { it !in listed }
+
+/**
+ * Every camera the phone lists and the physical cameras inside each, read once from Camera2, then any camera
+ * that answers by id though the list leaves it out (marked hidden).
+ */
 fun readLenses(context: Context): List<LensInfo> {
     val manager = context.getSystemService(CameraManager::class.java) ?: return emptyList()
     return try {
-        manager.cameraIdList.flatMap { id ->
+        val listedIds = manager.cameraIdList.toList()
+        val listed = listedIds.flatMap { id ->
             val characteristics = manager.getCameraCharacteristics(id)
             val back = characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
             val physical = characteristics.physicalCameraIds.mapNotNull { physicalId ->
@@ -70,6 +83,19 @@ fun readLenses(context: Context): List<LensInfo> {
             }
             listOf(lensInfo(id, null, back, characteristics)) + physical
         }
+        val known = listed.map { it.physicalId ?: it.cameraId }.toSet()
+        val hidden = hiddenCandidateIds(listedIds).filter { it !in known }.mapNotNull { id ->
+            try {
+                val characteristics = manager.getCameraCharacteristics(id)
+                val back = characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+                lensInfo(id, null, back, characteristics).copy(hidden = true)
+            } catch (_: IllegalArgumentException) {
+                null
+            } catch (_: CameraAccessException) {
+                null
+            }
+        }
+        listed + hidden
     } catch (e: CameraAccessException) {
         Log.w(TAG, "Listing the cameras failed", e)
         emptyList()
