@@ -32,14 +32,15 @@ fun hasSubject(mask: FloatArray, threshold: Float = 0.5f, minFraction: Float = 0
 /** Mixes two ARGB pixels; [alpha] is the confidence of the foreground, so 1 gives [sharp]. The result is opaque. */
 fun blend(sharp: Int, blurred: Int, alpha: Float): Int {
     val a = alpha.coerceIn(0f, 1f)
-    var result = 0xFF shl 24
-    for (shift in intArrayOf(16, 8, 0)) {
-        val s = sharp ushr shift and 0xFF
-        val b = blurred ushr shift and 0xFF
-        result = result or ((b + (s - b) * a).roundToInt().coerceIn(0, 255) shl shift)
-    }
-    return result
+    // Called once per pixel, so no loop over a channel array here.
+    val r = mixChannel(sharp ushr 16 and 0xFF, blurred ushr 16 and 0xFF, a)
+    val g = mixChannel(sharp ushr 8 and 0xFF, blurred ushr 8 and 0xFF, a)
+    val b = mixChannel(sharp and 0xFF, blurred and 0xFF, a)
+    return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
 }
+
+private fun mixChannel(sharp: Int, blurred: Int, alpha: Float): Int =
+    (blurred + (sharp - blurred) * alpha).roundToInt().coerceIn(0, 255)
 
 /** Bilinear value of a [maskWidth] x [maskHeight] mask at ([x], [y]) in mask pixels; clamped to the edge outside. */
 fun maskAt(mask: FloatArray, maskWidth: Int, maskHeight: Int, x: Float, y: Float): Float {
