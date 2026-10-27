@@ -195,7 +195,10 @@ class CameraSession(
     private val subjectMasker by lazy { MlKitSubjectMasker(app) }
     private val portraitProcessor by lazy { PortraitProcessor(subjectMasker) }
 
-    /** Whether Google Play services can run the portrait model; checked once, off the main thread. */
+    /**
+     * Whether the portrait model can run (the segmenter builds and Google Play services are present); checked
+     * once, off the main thread. A failure of ML Kit counts as unavailable, so it never fails a bind.
+     */
     private var customPortraitAvailable: Boolean? = null
 
     /** The bound Portrait mode is the app's own (no maker bokeh): photos are processed before saving. */
@@ -1024,7 +1027,9 @@ class CameraSession(
     }
 
     private suspend fun customPortraitAvailable(): Boolean =
-        customPortraitAvailable ?: withContext(Dispatchers.Default) { subjectMasker.available }
+        customPortraitAvailable ?: withContext(Dispatchers.Default) {
+            portraitAvailable({ Log.w(TAG, "Custom portrait unavailable", it) }) { subjectMasker.available }
+        }
             .also { customPortraitAvailable = it }
 
     /** Fire and forget: without the segmentation model a portrait is saved as an ordinary photo until it arrives. */
@@ -1035,6 +1040,8 @@ class CameraSession(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                Log.w(TAG, "Requesting the portrait model failed", e)
+            } catch (e: LinkageError) {
                 Log.w(TAG, "Requesting the portrait model failed", e)
             }
         }

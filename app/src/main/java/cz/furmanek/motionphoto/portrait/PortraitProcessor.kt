@@ -74,6 +74,9 @@ class PortraitProcessor(private val masker: SubjectMasker) {
         } catch (e: Exception) {
             Log.w(TAG, "Making a portrait failed", e)
             PortraitOutcome.FAILED
+        } catch (e: LinkageError) {
+            Log.w(TAG, "Making a portrait failed", e)
+            PortraitOutcome.FAILED
         } finally {
             if (small != null && small !== photo) small.recycle()
             photo?.recycle()
