@@ -32,9 +32,23 @@ class MediaStoreWriter(private val resolver: ContentResolver, private val packag
         }
     }
 
-    fun savePhoto(jpeg: File, capturedAtMillis: Long, location: Location?): Uri {
+    fun savePhoto(jpeg: File, capturedAtMillis: Long, location: Location?): Uri =
+        saveJpegFile(MediaKind.PHOTO, jpeg, capturedAtMillis, location)
+
+    /** Saves a stitched panorama as PXL_….PANO.jpg; EXIF needs a file, so it goes through a temp file. */
+    fun savePanorama(jpeg: ByteArray, capturedAtMillis: Long, location: Location?): Uri {
+        val file = File.createTempFile(TEMP_PANORAMA_PREFIX, ".jpg")
+        try {
+            file.writeBytes(jpeg)
+            return saveJpegFile(MediaKind.PANORAMA, file, capturedAtMillis, location)
+        } finally {
+            file.delete()
+        }
+    }
+
+    private fun saveJpegFile(kind: MediaKind, jpeg: File, capturedAtMillis: Long, location: Location?): Uri {
         location?.let { writeExifLocation(jpeg, it) }
-        return insertImage(MediaKind.PHOTO, capturedAtMillis) { output ->
+        return insertImage(kind, capturedAtMillis) { output ->
             jpeg.inputStream().use { it.copyTo(output) }
         }
     }
@@ -169,5 +183,6 @@ class MediaStoreWriter(private val resolver: ContentResolver, private val packag
 
     private companion object {
         val RELATIVE_PATH = Environment.DIRECTORY_DCIM + "/Camera"
+        const val TEMP_PANORAMA_PREFIX = "panorama_"
     }
 }

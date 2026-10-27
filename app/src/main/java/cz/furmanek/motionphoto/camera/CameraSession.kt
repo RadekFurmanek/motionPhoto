@@ -45,6 +45,11 @@ import cz.furmanek.motionphoto.R
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.media.MediaStoreWriter
 import cz.furmanek.motionphoto.media.SavedMedia
+import cz.furmanek.motionphoto.panorama.PanoramaCapture
+import cz.furmanek.motionphoto.panorama.PanoramaStatus
+import cz.furmanek.motionphoto.panorama.focalLengthPx
+import cz.furmanek.motionphoto.panorama.stitchPanorama
+import cz.furmanek.motionphoto.panorama.toJpeg
 import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.FlashSetting
@@ -59,10 +64,12 @@ import cz.furmanek.motionphoto.timelapse.TimelapseOutcome
 import cz.furmanek.motionphoto.timelapse.classifyTimelapse
 import cz.furmanek.motionphoto.location.LocationProvider
 import java.util.concurrent.TimeUnit
+import kotlin.math.atan
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -89,6 +96,17 @@ data class RecordingState(
     val frames: Int = 0,
 )
 
+/** A panorama being taken ([capturing]) or stitched ([stitchingProgress] 0..1). */
+data class PanoramaUiState(
+    val capturing: Boolean,
+    val count: Int = 0,
+    val sweptDeg: Float = 0f,
+    val level: Boolean = true,
+    /** Degrees to turn on to the next frame; positive in the turning direction. */
+    val yawToNextDeg: Float = 0f,
+    val stitchingProgress: Float? = null,
+)
+
 data class SessionState(
     val status: SessionStatus = SessionStatus.CLOSED,
     val errorMessage: String? = null,
@@ -103,6 +121,7 @@ data class SessionState(
     val lastCapture: Uri? = null,
     /** False when this camera cannot stream preview, still and video together; photos are then plain. */
     val livePhotoAvailable: Boolean = true,
+    val panorama: PanoramaUiState? = null,
 )
 
 sealed interface SessionEvent {
@@ -158,6 +177,8 @@ class CameraSession(
     private var imageAnalysis: ImageAnalysis? = null
     private val timelapseRecorder = TimelapseRecorder(app)
     private var timelapseClock: Job? = null
+    private val panoramaCapture = PanoramaCapture(app)
+    private var panoramaJob: Job? = null
     private var target: PreviewTarget? = null
     private var boundKey: BindingKey? = null
     private var bindJob: Job? = null
@@ -236,6 +257,8 @@ class CameraSession(
 
     fun onUiVisible(visible: Boolean) {
         if (visible) uiVisibility.shown() else uiVisibility.hidden()
+        // A panorama runs only while the app is on screen.
+        if (!uiVisible) cancelPanorama()
         routePreview()
         // Another screen (capture for another app) may have bound the camera meanwhile, which unbinds ours.
         val preview = preview
@@ -374,9 +397,11 @@ class CameraSession(
         }
     }
 
-    /** The shutter of the current mode: photo (or self-timer), or start/stop a video. */
+    /** The shutter of the current mode: photo (or self-timer), start/stop a video or a panorama. */
     fun onShutter() {
         when {
+            settings.mode == CaptureMode.PANORAMA ->
+                if (_state.value.panorama?.capturing == true) finishPanorama() else startPanorama()
             settings.mode.isVideo().not() -> takePhoto()
             _state.value.recording != null -> stopRecording()
             else -> startRecording()
@@ -500,6 +525,113 @@ class CameraSession(
         }
     }
 
+    /** Lens geometry for one panorama, fixed when it starts. */
+    private class PanoramaOptics(val focalMm: Float, val sensorMm: Float, val startedAtMillis: Long)
+
+    private var panoramaOptics: PanoramaOptics? = null
+
+    private fun startPanorama() {
+        val current = _state.value
+        val analysis = imageAnalysis ?: return
+        val camera = camera ?: return
+        val capabilities = current.capabilities ?: return
+        if (current.status != SessionStatus.READY || current.busy || current.panorama != null || !uiVisible) return
+        // Right after a mode switch the analysis stream may still be the time-lapse one.
+        if (boundKey?.mode != CaptureMode.PANORAMA) return
+        // Upright frames turned by 90° or 270° run along the sensor's short side.
+        val sensorMm = if (camera.cameraInfo.getSensorRotationDegrees(targetRotation) % 180 == 0) {
+            capabilities.sensorWidthMm
+        } else {
+            capabilities.sensorHeightMm
+        }
+        // Zoom crops every stream, which acts like a longer lens.
+        val focalMm = capabilities.focalMm * (camera.cameraInfo.zoomState.value?.zoomRatio ?: 1f)
+        val fovDeg = Math.toDegrees(2 * atan(sensorMm / (2.0 * focalMm))).toFloat()
+        val stepDeg = fovDeg / PANORAMA_STEPS_PER_FOV
+        panoramaOptics = PanoramaOptics(focalMm, sensorMm, System.currentTimeMillis())
+        _state.update { it.copy(panorama = PanoramaUiState(capturing = true, yawToNextDeg = stepDeg)) }
+        panoramaCapture.start(analysis, stepDeg, ::onPanoramaStatus, onFinished = ::finishPanorama)
+    }
+
+    private fun onPanoramaStatus(status: PanoramaStatus) {
+        _state.update { state ->
+            val panorama = state.panorama?.takeIf { it.capturing } ?: return@update state
+            state.copy(
+                panorama = panorama.copy(
+                    count = status.frames,
+                    sweptDeg = status.sweptDeg,
+                    level = status.level,
+                    yawToNextDeg = status.yawToNextDeg,
+                ),
+            )
+        }
+    }
+
+    /** Ends the capture and stitches what was taken on a background thread. */
+    private fun finishPanorama() {
+        if (_state.value.panorama?.capturing != true) return
+        val optics = panoramaOptics ?: return
+        _state.update { it.copy(panorama = it.panorama?.copy(capturing = false, stitchingProgress = 0f)) }
+        panoramaJob = scope.launch {
+            try {
+                val frames = panoramaCapture.stop()
+                if (frames.size < 2) {
+                    _events.tryEmit(SessionEvent.CaptureFailed(app.getString(R.string.panorama_too_short)))
+                    return@launch
+                }
+                val location = async {
+                    if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
+                }
+                val jpeg = withContext(Dispatchers.Default) {
+                    val focalPx = focalLengthPx(optics.focalMm, optics.sensorMm, frames.first().image.width)
+                    stitchPanorama(frames, focalPx) { progress ->
+                        _state.update { it.copy(panorama = it.panorama?.copy(stitchingProgress = progress)) }
+                    }.toJpeg(PANORAMA_JPEG_QUALITY)
+                }
+                val savedLocation = location.await()
+                // Once writing starts it completes, so a late cancel cannot leave a half-written entry.
+                val uri = withContext(NonCancellable + Dispatchers.IO) {
+                    writer.savePanorama(jpeg, optics.startedAtMillis, savedLocation)
+                }
+                _state.update { it.copy(lastCapture = uri) }
+                _events.tryEmit(SessionEvent.Saved(SavedMedia(uri, MediaKind.PANORAMA)))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Saving the panorama failed", e)
+                _events.tryEmit(SessionEvent.CaptureFailed(app.getString(R.string.panorama_failed)))
+            } catch (e: OutOfMemoryError) {
+                // A very wide panorama on a small heap: report it rather than crash.
+                Log.e(TAG, "Stitching the panorama ran out of memory", e)
+                _events.tryEmit(SessionEvent.CaptureFailed(app.getString(R.string.panorama_failed)))
+            } finally {
+                panoramaCapture.cancel()
+                endPanorama()
+            }
+        }
+    }
+
+    /** Throws away a panorama being taken or stitched; nothing is saved. */
+    private fun cancelPanorama() {
+        val job = panoramaJob
+        when {
+            // Its finally block cleans up.
+            job != null && job.isActive -> job.cancel()
+            _state.value.panorama != null -> {
+                panoramaCapture.cancel()
+                endPanorama()
+            }
+        }
+    }
+
+    private fun endPanorama() {
+        panoramaJob = null
+        panoramaOptics = null
+        _state.update { it.copy(panorama = null) }
+        applyTargetRotation()
+        requestBind()
+    }
+
     private fun reportRecordingProblem(message: String) {
         _events.tryEmit(SessionEvent.CaptureFailed(message))
         if (!uiVisible) RecordingService.notifyResult(app, message)
@@ -549,7 +681,7 @@ class CameraSession(
         if (settings.shutterSoundRequired(shutterSoundMandatory)) shutterSound.play(sound)
     }
 
-    private fun isLocked(): Boolean = _state.value.busy || _state.value.recording != null
+    private fun isLocked(): Boolean = _state.value.busy || _state.value.recording != null || _state.value.panorama != null
 
     private fun updateLifecycle() {
         registry.currentState = if (uiVisible || _state.value.recording != null) {
@@ -605,12 +737,12 @@ class CameraSession(
         }
         val cameraInfo = provider.getCameraInfo(selector)
         val extensions = extensions(provider)
-        val capabilities = CapabilityProbe.probe(provider, cameraInfo, selector, extensions)
+        val capabilities = CapabilityProbe.probe(provider, cameraInfo, selector, extensions, panoramaCapture.available)
         val lensFacing = cameraInfo.lensFacing
 
         // A stored mode or HDR this camera cannot do (other phone, front camera) is dropped; the settings
         // change starts a new bind.
-        val mode = fallbackMode(key.mode, availableModes(capabilities))
+        val mode = fallbackMode(key.mode, availableModes(capabilities, lensFacing))
         val hdrAvailable = ExtensionMode.HDR in capabilities.extensionModes
         if (mode != key.mode || (key.hdr && !hdrAvailable)) {
             settingsRepository.update { it.copy(mode = mode, hdr = it.hdr && hdrAvailable) }
@@ -634,7 +766,7 @@ class CameraSession(
 
         val photoAspect = when (key.mode) {
             CaptureMode.VIDEO, CaptureMode.TIMELAPSE -> AspectRatio.RATIO_16_9
-            CaptureMode.PORTRAIT, CaptureMode.NIGHT -> AspectRatio.RATIO_4_3
+            CaptureMode.PORTRAIT, CaptureMode.NIGHT, CaptureMode.PANORAMA -> AspectRatio.RATIO_4_3
             else -> key.aspect.streamAspect()
         }
         val videoQuality = if (key.mode == CaptureMode.VIDEO) {
@@ -693,7 +825,7 @@ class CameraSession(
                 ImageAnalysis.Builder()
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setResolutionSelector(analysisResolution(photoAspect))
+                    .setResolutionSelector(analysisResolution(photoAspect, analysisSize(key.mode)))
                     .build()
             } else {
                 null
@@ -916,7 +1048,7 @@ class CameraSession(
     private fun viewPort(key: BindingKey): ViewPort {
         val (width, height) = when {
             key.mode == CaptureMode.VIDEO || key.mode == CaptureMode.TIMELAPSE -> 9 to 16
-            key.mode == CaptureMode.PORTRAIT || key.mode == CaptureMode.NIGHT -> 3 to 4
+            key.mode == CaptureMode.PORTRAIT || key.mode == CaptureMode.NIGHT || key.mode == CaptureMode.PANORAMA -> 3 to 4
             key.aspect == PhotoAspect.RATIO_16_9 -> 9 to 16
             key.aspect == PhotoAspect.RATIO_1_1 -> 1 to 1
             else -> 3 to 4
@@ -962,12 +1094,19 @@ class CameraSession(
         fun PhotoAspect.streamAspect(): Int =
             if (this == PhotoAspect.RATIO_16_9) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
 
-        /** Analysis frames near 1080p: enough for a time-lapse, cheap to convert every interval. */
-        fun analysisResolution(aspect: Int): ResolutionSelector = ResolutionSelector.Builder()
+        const val PANORAMA_STEPS_PER_FOV = 3
+        const val PANORAMA_JPEG_QUALITY = 92
+
+        /**
+         * Analysis frames near 1080p for a time-lapse: enough for video, cheap to convert every interval.
+         * Near 1280×960 for a panorama: frames are kept at most 960 px tall anyway.
+         */
+        fun analysisSize(mode: CaptureMode): android.util.Size =
+            if (mode == CaptureMode.PANORAMA) android.util.Size(1280, 960) else android.util.Size(1920, 1080)
+
+        fun analysisResolution(aspect: Int, size: android.util.Size): ResolutionSelector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy(aspect, AspectRatioStrategy.FALLBACK_RULE_AUTO))
-            .setResolutionStrategy(
-                ResolutionStrategy(android.util.Size(1920, 1080), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER),
-            )
+            .setResolutionStrategy(ResolutionStrategy(size, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
             .build()
 
         fun resolutionSelector(aspect: Int): ResolutionSelector = ResolutionSelector.Builder()

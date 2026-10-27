@@ -70,4 +70,12 @@ class BindingPlanTest {
             bindingAttempts(CaptureMode.TIMELAPSE, livePhoto = true, videoExtras = true),
         )
     }
+
+    @Test
+    fun `panorama binds preview and frame analysis`() {
+        assertEquals(
+            listOf(BindingAttempt(setOf(PREVIEW, ANALYSIS))),
+            bindingAttempts(CaptureMode.PANORAMA, livePhoto = true, videoExtras = true),
+        )
+    }
 }

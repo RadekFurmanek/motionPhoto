@@ -24,7 +24,15 @@ data class CameraCapabilities(
     val slowMotionFps: Set<Int> = emptySet(),
     /** Maker extensions this camera offers (ExtensionMode.BOKEH, NIGHT, HDR). */
     val extensionModes: Set<Int> = emptySet(),
-)
+    /** The phone has a rotation vector sensor (panorama). */
+    val hasRotationVector: Boolean = false,
+    /** Lens focal length and physical sensor size in mm, 0 when the camera does not report them. */
+    val focalMm: Float = 0f,
+    val sensorWidthMm: Float = 0f,
+    val sensorHeightMm: Float = 0f,
+) {
+    val hasOptics: Boolean get() = focalMm > 0f && sensorWidthMm > 0f && sensorHeightMm > 0f
+}
 
 private val ZOOM_STEPS = listOf(1f, 2f, 5f, 10f)
 private const val ULTRA_WIDE_PRESET = 0.5f

@@ -24,6 +24,11 @@ class MediaNamingTest {
     }
 
     @Test
+    fun `panorama gets the PANO suffix`() {
+        assertEquals("PXL_20251026_171338.PANO.jpg", MediaNaming.fileName(MediaKind.PANORAMA, 1_761_498_818_000))
+    }
+
+    @Test
     fun `name is in UTC regardless of the device time zone`() {
         TimeZone.setDefault(TimeZone.getTimeZone("Asia/Tokyo"))
 

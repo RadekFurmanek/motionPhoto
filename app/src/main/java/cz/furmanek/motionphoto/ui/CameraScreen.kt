@@ -145,6 +145,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                         MediaKind.MOTION_PHOTO -> R.string.saved
                         MediaKind.PHOTO -> R.string.saved_photo
                         MediaKind.VIDEO -> R.string.saved_video
+                        MediaKind.PANORAMA -> R.string.saved_panorama
                     }
                     val result = snackbarHostState.showSnackbar(
                         message = resources.getString(message),
@@ -296,7 +297,7 @@ private fun BottomControls(
     val locked = state.busy || recording != null
     val ready = state.status == SessionStatus.READY
     val isVideo = settings.mode.isVideo()
-    val modes = capabilities?.let(::availableModes) ?: DEFAULT_MODES
+    val modes = capabilities?.let { availableModes(it, state.lensFacing) } ?: DEFAULT_MODES
     val swipeThresholdPx = with(LocalDensity.current) { MODE_SWIPE_THRESHOLD.toPx() }
 
     Column(

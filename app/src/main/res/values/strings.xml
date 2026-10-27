@@ -10,6 +10,7 @@
     <string name="saved">Živá fotka uložena</string>
     <string name="saved_photo">Fotka uložena</string>
     <string name="saved_video">Video uloženo</string>
+    <string name="saved_panorama">Panorama uložena</string>
     <string name="view">Zobrazit</string>
     <string name="error_capture">Pořízení se nezdařilo: %1$s</string>
     <string name="camera_error_no_camera">Telefon nemá dostupný fotoaparát</string>
@@ -82,4 +83,6 @@
     <string name="timelapse_interval">Interval časosběru</string>
     <string name="timelapse_interval_value">%1$s s</string>
     <string name="timelapse_notification_title">Natáčí se časosběr</string>
+    <string name="panorama_too_short">Panorama je příliš krátká, otočte telefonem dál. Nic se neuložilo</string>
+    <string name="panorama_failed">Panoramu se nepodařilo složit</string>
 </resources>

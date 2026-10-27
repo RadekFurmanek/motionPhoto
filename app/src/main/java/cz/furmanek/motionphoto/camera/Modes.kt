@@ -3,9 +3,13 @@ package cz.furmanek.motionphoto.camera
 import androidx.camera.extensions.ExtensionMode
 import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
+import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
 
-/** Modes the bar offers for this camera, in bar order. Only modes the app implements and the camera supports. */
-fun availableModes(capabilities: CameraCapabilities): List<CaptureMode> = CaptureMode.entries.filter { mode ->
+/**
+ * Modes the bar offers for this camera, in bar order. Only modes the app implements and the camera supports.
+ * Panorama needs the back camera, a rotation vector sensor and the lens optics to project the frames.
+ */
+fun availableModes(capabilities: CameraCapabilities, lensFacing: Int): List<CaptureMode> = CaptureMode.entries.filter { mode ->
     when (mode) {
         CaptureMode.VIDEO -> capabilities.videoQualities.isNotEmpty()
         CaptureMode.PHOTO -> true
@@ -13,7 +17,7 @@ fun availableModes(capabilities: CameraCapabilities): List<CaptureMode> = Captur
         CaptureMode.PORTRAIT -> ExtensionMode.BOKEH in capabilities.extensionModes
         CaptureMode.NIGHT -> ExtensionMode.NIGHT in capabilities.extensionModes
         CaptureMode.TIMELAPSE -> true
-        CaptureMode.PANORAMA -> false
+        CaptureMode.PANORAMA -> lensFacing == LENS_FACING_BACK && capabilities.hasRotationVector && capabilities.hasOptics
     }
 }
 

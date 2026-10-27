@@ -1,5 +1,6 @@
 package cz.furmanek.motionphoto.camera
 
+import android.hardware.camera2.CameraCharacteristics
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -29,12 +30,17 @@ object CapabilityProbe {
     private val SLOW_MOTION_RATES = listOf(120, 240)
     private val EXTENSION_MODES = listOf(ExtensionMode.BOKEH, ExtensionMode.NIGHT, ExtensionMode.HDR)
 
-    /** [extensions] is null when the maker offers no Extensions or they failed to load. */
+    /**
+     * [extensions] is null when the maker offers no Extensions or they failed to load. [hasRotationVector]
+     * comes from the phone's sensors, not the camera.
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
     fun probe(
         provider: ProcessCameraProvider,
         cameraInfo: CameraInfo,
         selector: CameraSelector,
         extensions: ExtensionsManager?,
+        hasRotationVector: Boolean,
     ): CameraCapabilities {
         val videoCapabilities = Recorder.getVideoCapabilities(cameraInfo)
         val qualities = videoCapabilities.getSupportedQualities(DynamicRange.SDR)
@@ -42,6 +48,8 @@ object CapabilityProbe {
             .sorted()
         val zoom = cameraInfo.zoomState.value
         val exposure = cameraInfo.exposureState
+        val characteristics = Camera2CameraInfo.from(cameraInfo)
+        val sensorSize = characteristics.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
         return CameraCapabilities(
             hasFlash = cameraInfo.hasFlashUnit(),
             minZoom = zoom?.minZoomRatio ?: 1f,
@@ -64,6 +72,11 @@ object CapabilityProbe {
             extensionModes = optional("extensions") {
                 EXTENSION_MODES.filterTo(mutableSetOf()) { extensions?.isExtensionAvailable(selector, it) == true }
             },
+            hasRotationVector = hasRotationVector,
+            focalMm = characteristics.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                ?.firstOrNull() ?: 0f,
+            sensorWidthMm = sensorSize?.width ?: 0f,
+            sensorHeightMm = sensorSize?.height ?: 0f,
         )
     }
 

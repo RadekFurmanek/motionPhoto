@@ -8,6 +8,7 @@ enum class MediaKind(val suffix: String, val mimeType: String) {
     MOTION_PHOTO(".MP.jpg", "image/jpeg"),
     PHOTO(".jpg", "image/jpeg"),
     VIDEO(".mp4", "video/mp4"),
+    PANORAMA(".PANO.jpg", "image/jpeg"),
 }
 
 /** A capture as saved: where it is and what it turned out to be. */

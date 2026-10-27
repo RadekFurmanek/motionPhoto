@@ -29,7 +29,6 @@ fun bindingAttempts(mode: CaptureMode, livePhoto: Boolean, videoExtras: Boolean)
         } else {
             listOf(BindingAttempt(photo))
         }
-        CaptureMode.TIMELAPSE -> listOf(BindingAttempt(setOf(UseCaseKind.PREVIEW, UseCaseKind.ANALYSIS)))
-        CaptureMode.PANORAMA -> listOf(BindingAttempt(setOf(UseCaseKind.PREVIEW)))
+        CaptureMode.TIMELAPSE, CaptureMode.PANORAMA -> listOf(BindingAttempt(setOf(UseCaseKind.PREVIEW, UseCaseKind.ANALYSIS)))
     }
 }
