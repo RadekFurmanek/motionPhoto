@@ -15,6 +15,16 @@ fun standardSampleSize(width: Int, height: Int): Int {
     return sampleSize
 }
 
+/**
+ * Mask feathering and background blur radii as fractions of the longer side of the image they are applied
+ * to; the photo and the live preview share them, so the preview shows the blur the photo will get.
+ */
+const val MASK_FEATHER = 0.01f
+const val BACKGROUND_BLUR = 0.012f
+
+/** A blur radius of [fraction] of [longestSide] pixels, at least 1. */
+fun blurRadius(longestSide: Int, fraction: Float): Int = max(1, (longestSide * fraction).roundToInt())
+
 /** Scales down to fit [maxSide] on the longer side, keeping the aspect ratio; never scales up. */
 fun fitInside(width: Int, height: Int, maxSide: Int): Pair<Int, Int> {
     val longest = max(width, height)
@@ -224,6 +234,26 @@ private fun blurLine(line: IntArray, scratch: IntArray, n: Int, radius: Int) {
 
 /** Moving average over a window of 2 * [radius] + 1 values, rounded; values beyond either end repeat the end value. */
 private fun boxPass(src: IntArray, dst: IntArray, n: Int, radius: Int) {
+    val window = 2 * radius + 1
+    // Plane values are at most 255 in fixed point; Int sums are exact while the window holds no more than this.
+    if (window > Int.MAX_VALUE / (255 shl FRACTION_BITS)) {
+        boxPassLong(src, dst, n, radius)
+        return
+    }
+    val half = window / 2
+    val last = n - 1
+    var sum = 0
+    for (i in -radius..radius) sum += src[if (i < 0) 0 else if (i > last) last else i]
+    for (i in 0 until n) {
+        dst[i] = (sum + half) / window
+        val add = i + radius + 1
+        val remove = i - radius
+        sum += src[if (add > last) last else add] - src[if (remove < 0) 0 else remove]
+    }
+}
+
+/** [boxPass] for windows too wide for an Int sum. */
+private fun boxPassLong(src: IntArray, dst: IntArray, n: Int, radius: Int) {
     val window = 2 * radius + 1
     var sum = 0L
     for (i in -radius..radius) sum += src[i.coerceIn(0, n - 1)]

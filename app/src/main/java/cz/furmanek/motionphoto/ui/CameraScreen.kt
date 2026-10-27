@@ -11,6 +11,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -56,6 +57,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -105,6 +107,7 @@ private val MODE_SWIPE_THRESHOLD = 48.dp
 fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
     val state by viewModel.sessionState.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val portraitFrame by viewModel.portraitFrame.collectAsStateWithLifecycle(initialValue = null)
     val context = LocalContext.current
     val resources = LocalResources.current
     val displayRotation = LocalView.current.display?.rotation ?: Surface.ROTATION_0
@@ -187,6 +190,17 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
             .background(Color.Black),
     ) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+
+        // The live portrait's blurred background: the same 3:4 frame as the preview, fitted the same way, and
+        // transparent over the subject, which stays the sharp preview. It takes no touches, so taps still focus.
+        portraitFrame?.let { frame ->
+            Image(
+                bitmap = frame,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
         // Taps go to the PreviewView's metering factory, which uses the same coordinates as this overlay.
         // The transform detector comes after the tap detector, so it sees pinches first and consumes them.

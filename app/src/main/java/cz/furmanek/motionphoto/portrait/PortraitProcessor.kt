@@ -15,7 +15,6 @@ import java.io.File
 import java.io.IOException
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 
 /** Prefix of the processor's temp files, which sit next to the photo being processed. */
 const val PORTRAIT_TEMP_PREFIX = "portrait_"
@@ -50,9 +49,9 @@ class PortraitProcessor(private val masker: SubjectMasker) {
                 ?: return@withContext PortraitOutcome.MODEL_MISSING
             if (!hasSubject(confidence)) return@withContext PortraitOutcome.NO_SUBJECT
             val longest = max(maskWidth, maskHeight)
-            val soft = blurMask(confidence, maskWidth, maskHeight, radius(longest, MASK_FEATHER))
+            val soft = blurMask(confidence, maskWidth, maskHeight, blurRadius(longest, MASK_FEATHER))
 
-            val background = boxBlur(Raster(maskWidth, maskHeight, smallPixels), radius(longest, BACKGROUND_BLUR)).pixels
+            val background = boxBlur(Raster(maskWidth, maskHeight, smallPixels), blurRadius(longest, BACKGROUND_BLUR)).pixels
 
             ensureActive()
             composite(photo, soft, background, maskWidth, maskHeight)
@@ -162,12 +161,6 @@ class PortraitProcessor(private val masker: SubjectMasker) {
         const val MASK_MAX_SIDE = 1024
         const val STRIP_ROWS = 64
         const val JPEG_QUALITY = 95
-
-        /** Mask feathering and background blur radii as fractions of the mask's longer side. */
-        const val MASK_FEATHER = 0.01f
-        const val BACKGROUND_BLUR = 0.012f
-
-        fun radius(longestSide: Int, fraction: Float): Int = max(1, (longestSide * fraction).roundToInt())
 
         val EXIF_TAGS = listOf(
             ExifInterface.TAG_ORIENTATION,

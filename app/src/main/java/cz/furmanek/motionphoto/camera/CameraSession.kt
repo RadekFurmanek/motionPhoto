@@ -42,6 +42,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.asFlow
+import androidx.compose.ui.graphics.ImageBitmap
 import cz.furmanek.motionphoto.R
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.media.MediaStoreWriter
@@ -53,6 +54,7 @@ import cz.furmanek.motionphoto.panorama.stitchPanorama
 import cz.furmanek.motionphoto.panorama.toJpeg
 import cz.furmanek.motionphoto.portrait.MlKitSubjectMasker
 import cz.furmanek.motionphoto.portrait.PortraitOutcome
+import cz.furmanek.motionphoto.portrait.PortraitPreview
 import cz.furmanek.motionphoto.portrait.PortraitProcessor
 import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
@@ -71,18 +73,22 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.atan
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -195,6 +201,16 @@ class CameraSession(
     private val subjectMasker by lazy { MlKitSubjectMasker(app) }
     private val portraitProcessor by lazy { PortraitProcessor(subjectMasker) }
 
+    /** Built the first time a custom portrait is bound, for the same reason as [subjectMasker]. */
+    private val portraitPreview = MutableStateFlow<PortraitPreview?>(null)
+
+    /** The analysis stream [portraitPreview] draws from; null while it is stopped. */
+    private var portraitAnalysis: ImageAnalysis? = null
+
+    /** The custom portrait's blurred background, drawn over the preview; null shows the preview alone. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val portraitFrame: Flow<ImageBitmap?> = portraitPreview.flatMapLatest { it?.frame ?: flowOf(null) }
+
     /**
      * Whether the portrait model can run (the segmenter builds and Google Play services are present); checked
      * once, off the main thread. A failure of ML Kit counts as unavailable, so it never fails a bind.
@@ -282,8 +298,9 @@ class CameraSession(
 
     fun onUiVisible(visible: Boolean) {
         if (visible) uiVisibility.shown() else uiVisibility.hidden()
-        // A panorama runs only while the app is on screen.
+        // A panorama and the live portrait run only while the app is on screen.
         if (!uiVisible) cancelPanorama()
+        updatePortraitPreview()
         routePreview()
         // Another screen (capture for another app) may have bound the camera meanwhile, which unbinds ours.
         val preview = preview
@@ -798,6 +815,8 @@ class CameraSession(
 
     private suspend fun bind(key: BindingKey, target: PreviewTarget) {
         _state.update { it.copy(status = SessionStatus.OPENING, errorMessage = null) }
+        // The analysis stream is about to be replaced (or dropped by another mode).
+        stopPortraitPreview()
         val provider = provider ?: ProcessCameraProvider.awaitInstance(app).also { provider = it }
 
         val selector = selectorFor(provider, key) ?: run {
@@ -1024,6 +1043,26 @@ class CameraSession(
                 },
             )
         }
+        updatePortraitPreview()
+    }
+
+    /** Runs the live portrait while a custom portrait is bound and the app is on screen; stops it otherwise. */
+    private fun updatePortraitPreview() {
+        val analysis = imageAnalysis
+        if (!customPortraitBound || !uiVisible || analysis == null || camera == null) {
+            stopPortraitPreview()
+            return
+        }
+        if (portraitAnalysis === analysis) return
+        val preview = portraitPreview.value ?: PortraitPreview(subjectMasker, scope).also { portraitPreview.value = it }
+        // The preview shows a front camera mirrored, whatever the saved photos do.
+        preview.start(analysis, mirrored = _state.value.lensFacing == LENS_FACING_FRONT)
+        portraitAnalysis = analysis
+    }
+
+    private fun stopPortraitPreview() {
+        portraitAnalysis = null
+        portraitPreview.value?.stop()
     }
 
     private suspend fun customPortraitAvailable(): Boolean =
@@ -1100,7 +1139,8 @@ class CameraSession(
 
     private fun applyTargetRotation() {
         imageCapture?.targetRotation = targetRotation
-        imageAnalysis?.targetRotation = targetRotation
+        // The live portrait is drawn over the preview, so its frames turn with the display, not the device.
+        imageAnalysis?.targetRotation = boundKey?.displayRotation?.takeIf { customPortraitBound } ?: targetRotation
         videoCapture?.targetRotation = targetRotation
     }
 
@@ -1132,6 +1172,7 @@ class CameraSession(
     private fun cameraId(camera: Camera): String = Camera2CameraInfo.from(camera.cameraInfo).cameraId
 
     private fun fail(message: String) {
+        stopPortraitPreview()
         camera = null
         boundKey = null
         _state.update { it.copy(status = SessionStatus.ERROR, errorMessage = message) }
@@ -1201,9 +1242,13 @@ class CameraSession(
         /**
          * Analysis frames near 1080p for a time-lapse: enough for video, cheap to convert every interval.
          * Near 1280×960 for a panorama: frames are kept at most 960 px tall anyway.
+         * Near 960×720 for the live portrait: it is blurred at 480 px tall.
          */
-        fun analysisSize(mode: CaptureMode): android.util.Size =
-            if (mode == CaptureMode.PANORAMA) android.util.Size(1280, 960) else android.util.Size(1920, 1080)
+        fun analysisSize(mode: CaptureMode): android.util.Size = when (mode) {
+            CaptureMode.PANORAMA -> android.util.Size(1280, 960)
+            CaptureMode.PORTRAIT -> android.util.Size(960, 720)
+            else -> android.util.Size(1920, 1080)
+        }
 
         fun analysisResolution(aspect: Int, size: android.util.Size): ResolutionSelector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy(aspect, AspectRatioStrategy.FALLBACK_RULE_AUTO))
