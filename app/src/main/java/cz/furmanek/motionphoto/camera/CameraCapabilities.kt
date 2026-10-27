@@ -30,6 +30,8 @@ data class CameraCapabilities(
     val focalMm: Float = 0f,
     val sensorWidthMm: Float = 0f,
     val sensorHeightMm: Float = 0f,
+    /** The app can make portraits itself (on-device subject segmentation), for phones without the maker's bokeh. */
+    val customPortrait: Boolean = false,
 ) {
     val hasOptics: Boolean get() = focalMm > 0f && sensorWidthMm > 0f && sensorHeightMm > 0f
 }

@@ -42,6 +42,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.asFlow
+import androidx.compose.ui.graphics.ImageBitmap
 import cz.furmanek.motionphoto.R
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.media.MediaStoreWriter
@@ -51,6 +52,11 @@ import cz.furmanek.motionphoto.panorama.PanoramaStatus
 import cz.furmanek.motionphoto.panorama.focalLengthPx
 import cz.furmanek.motionphoto.panorama.stitchPanorama
 import cz.furmanek.motionphoto.panorama.toJpeg
+import cz.furmanek.motionphoto.portrait.MlKitSubjectMasker
+import cz.furmanek.motionphoto.portrait.PortraitOutcome
+import cz.furmanek.motionphoto.portrait.PortraitPreview
+import cz.furmanek.motionphoto.portrait.PortraitProcessor
+import cz.furmanek.motionphoto.portrait.clampBlur
 import cz.furmanek.motionphoto.settings.CameraSettings
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.FlashSetting
@@ -68,18 +74,22 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.atan
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -131,7 +141,8 @@ data class SessionState(
 }
 
 sealed interface SessionEvent {
-    data class Saved(val media: SavedMedia) : SessionEvent
+    /** [notice] explains a shot saved plainer than asked (a custom portrait that came out as an ordinary photo). */
+    data class Saved(val media: SavedMedia, val notice: String? = null) : SessionEvent
     data class CaptureFailed(val message: String) : SessionEvent
     /** The recording stopped early (storage full, camera taken away); what was recorded is saved at [uri]. */
     data class RecordingInterrupted(val uri: Uri?) : SessionEvent
@@ -185,6 +196,38 @@ class CameraSession(
     private var timelapseClock: Job? = null
     private val panoramaCapture = PanoramaCapture(app)
     private var panoramaJob: Job? = null
+
+    // Built on first use, so modes other than Portrait never pay for ML Kit. Lives as long as the session,
+    // which is the app process; there is no point at which to close it.
+    private val subjectMasker by lazy { MlKitSubjectMasker(app) }
+    private val portraitProcessor by lazy { PortraitProcessor(subjectMasker) }
+
+    /** Built the first time a custom portrait is bound, for the same reason as [subjectMasker]. */
+    private val portraitPreview = MutableStateFlow<PortraitPreview?>(null)
+
+    /** The analysis stream [portraitPreview] draws from; null while it is stopped. */
+    private var portraitAnalysis: ImageAnalysis? = null
+
+    /**
+     * The custom portrait's background blur: set at once by [setPortraitBlur], so the live preview follows the
+     * slider without waiting for the settings store, which [persistPortraitBlur] updates when the slider is let go.
+     */
+    private val _portraitBlur = MutableStateFlow(CameraSettings().portraitBlur)
+    val portraitBlur: StateFlow<Float> = _portraitBlur.asStateFlow()
+    private var portraitBlurWrite: Job? = null
+
+    /** The custom portrait's blurred background, drawn over the preview; null shows the preview alone. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val portraitFrame: Flow<ImageBitmap?> = portraitPreview.flatMapLatest { it?.frame ?: flowOf(null) }
+
+    /**
+     * Whether the portrait model can run (the segmenter builds and Google Play services are present); checked
+     * once, off the main thread. A failure of ML Kit counts as unavailable, so it never fails a bind.
+     */
+    private var customPortraitAvailable: Boolean? = null
+
+    /** The bound Portrait mode is the app's own (no maker bokeh): photos are processed before saving. */
+    private var customPortraitBound = false
     private var target: PreviewTarget? = null
     private var boundKey: BindingKey? = null
     private var bindJob: Job? = null
@@ -238,6 +281,8 @@ class CameraSession(
                 if (_state.value.panorama?.capturing == true && endsPanorama(settings, new)) cancelPanorama()
                 settings = new
                 settingsLoaded = true
+                // While the slider's write is still landing, the older value must not pull it back.
+                if (portraitBlurWrite?.isActive != true) _portraitBlur.value = new.portraitBlur
                 applyCameraControls()
                 requestBind()
             }
@@ -264,8 +309,9 @@ class CameraSession(
 
     fun onUiVisible(visible: Boolean) {
         if (visible) uiVisibility.shown() else uiVisibility.hidden()
-        // A panorama runs only while the app is on screen.
+        // A panorama and the live portrait run only while the app is on screen.
         if (!uiVisible) cancelPanorama()
+        updatePortraitPreview()
         routePreview()
         // Another screen (capture for another app) may have bound the camera meanwhile, which unbinds ours.
         val preview = preview
@@ -354,6 +400,18 @@ class CameraSession(
         _state.update { it.copy(exposureIndex = clamped) }
     }
 
+    /** The custom portrait's background blur, a fraction of the longer side; the live preview follows at once. */
+    fun setPortraitBlur(fraction: Float) {
+        _portraitBlur.value = clampBlur(fraction)
+    }
+
+    /** Stores the blur once the slider is let go; every move would rewrite the settings and rerun the camera controls. */
+    fun persistPortraitBlur() {
+        val blur = _portraitBlur.value
+        portraitBlurWrite?.cancel()
+        portraitBlurWrite = scope.launch { settingsRepository.update { it.copy(portraitBlur = blur) } }
+    }
+
     /** Orientation photos and videos are saved in, as a [Surface] rotation; held while a capture runs. */
     fun setTargetRotation(rotation: Int) {
         targetRotation = rotation
@@ -379,9 +437,9 @@ class CameraSession(
                     delay(COUNTDOWN_STEP_MS)
                 }
                 _state.update { it.copy(countdown = null) }
-                val saved = shoot(imageCapture)
-                _state.update { it.copy(lastCapture = saved.uri) }
-                _events.tryEmit(SessionEvent.Saved(saved))
+                val shot = shoot(imageCapture)
+                _state.update { it.copy(lastCapture = shot.media.uri) }
+                _events.tryEmit(SessionEvent.Saved(shot.media, shot.notice))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -395,7 +453,10 @@ class CameraSession(
         }
     }
 
-    private suspend fun shoot(imageCapture: ImageCapture): SavedMedia = coroutineScope {
+    /** A saved shot; [notice] says why it came out plainer than asked (a custom portrait that did not work). */
+    private class Shot(val media: SavedMedia, val notice: String? = null)
+
+    private suspend fun shoot(imageCapture: ImageCapture): Shot = coroutineScope {
         val capturedAt = System.currentTimeMillis()
         val location = async {
             if (settings.saveLocation) runCatching { locationProvider.currentOrNull() }.getOrNull() else null
@@ -403,10 +464,19 @@ class CameraSession(
         playSound(MediaActionSound.SHUTTER_CLICK)
         val mirrored = settings.mirrorFrontCamera && _state.value.lensFacing == LENS_FACING_FRONT
         val videoCapture = videoCapture
-        if (settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && videoCapture != null) {
-            photoCapture.captureMotionPhoto(imageCapture, videoCapture, capturedAt, mirrored, location)
-        } else {
-            photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location)
+        when {
+            settings.mode == CaptureMode.PORTRAIT && customPortraitBound -> {
+                val resolution = settings.portraitResolution
+                val blur = _portraitBlur.value
+                var outcome = PortraitOutcome.FAILED
+                val media = photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location) { file ->
+                    outcome = portraitProcessor.process(file, resolution, blur)
+                }
+                Shot(media, portraitNotice(outcome)?.let(app::getString))
+            }
+            settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && videoCapture != null ->
+                Shot(photoCapture.captureMotionPhoto(imageCapture, videoCapture, capturedAt, mirrored, location))
+            else -> Shot(photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location))
         }
     }
 
@@ -769,6 +839,8 @@ class CameraSession(
 
     private suspend fun bind(key: BindingKey, target: PreviewTarget) {
         _state.update { it.copy(status = SessionStatus.OPENING, errorMessage = null) }
+        // The analysis stream is about to be replaced (or dropped by another mode).
+        stopPortraitPreview()
         val provider = provider ?: ProcessCameraProvider.awaitInstance(app).also { provider = it }
 
         val selector = selectorFor(provider, key) ?: run {
@@ -777,7 +849,14 @@ class CameraSession(
         }
         val cameraInfo = provider.getCameraInfo(selector)
         val extensions = extensions(provider)
-        val capabilities = CapabilityProbe.probe(provider, cameraInfo, selector, extensions, panoramaCapture.available)
+        val capabilities = CapabilityProbe.probe(
+            provider,
+            cameraInfo,
+            selector,
+            extensions,
+            hasRotationVector = panoramaCapture.available,
+            customPortrait = customPortraitAvailable(),
+        )
         val lensFacing = cameraInfo.lensFacing
 
         // A stored mode or HDR this camera cannot do (other phone, front camera) is dropped; the settings
@@ -792,8 +871,10 @@ class CameraSession(
             bindSlowMotion(key, target, provider, selector, cameraInfo, capabilities)
             return
         }
+        val customPortrait = usesCustomPortrait(key.mode, capabilities)
+        if (customPortrait) startPortraitModelDownload()
         val extensionMode = when {
-            key.mode == CaptureMode.PORTRAIT -> ExtensionMode.BOKEH
+            key.mode == CaptureMode.PORTRAIT && !customPortrait -> ExtensionMode.BOKEH
             key.mode == CaptureMode.NIGHT -> ExtensionMode.NIGHT
             key.mode == CaptureMode.PHOTO && key.hdr -> ExtensionMode.HDR
             else -> null
@@ -820,7 +901,7 @@ class CameraSession(
 
         var lastError: RuntimeException? = null
         val wantsVideoExtras = key.videoFps60 || key.videoStabilization
-        val attempts = bindingAttempts(key.mode, key.livePhoto, wantsVideoExtras)
+        val attempts = bindingAttempts(key.mode, key.livePhoto, wantsVideoExtras, customPortrait)
         for ((index, attempt) in attempts.withIndex()) {
             val kinds = attempt.kinds
             val preview = Preview.Builder().setResolutionSelector(resolutionSelector(photoAspect)).build()
@@ -831,9 +912,9 @@ class CameraSession(
             val imageCapture = if (UseCaseKind.IMAGE in kinds) {
                 ImageCapture.Builder()
                     // Minimal shutter lag keeps a live photo's still close to its stamped moment in the clip;
-                    // the maker's processing (portrait, night, HDR) is about quality instead.
+                    // portrait (the maker's or ours), night and HDR are about quality instead.
                     .setCaptureMode(
-                        if (extensionMode == null) {
+                        if (extensionMode == null && !customPortrait) {
                             ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                         } else {
                             ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
@@ -890,6 +971,7 @@ class CameraSession(
             // A live photo that had to drop its video stream is not available on this camera.
             val livePhotoAvailable = !(key.mode == CaptureMode.PHOTO && key.livePhoto && index > 0)
             this.imageAnalysis = imageAnalysis
+            customPortraitBound = customPortrait
             onBound(key, bound, preview, imageCapture, videoCapture, capabilities, lensFacing, livePhotoAvailable)
             return
         }
@@ -945,6 +1027,7 @@ class CameraSession(
             return
         }
         imageAnalysis = null
+        customPortraitBound = false
         onBound(key, bound, preview, null, videoCapture, capabilities, cameraInfo.lensFacing, livePhotoAvailable = true)
     }
 
@@ -984,6 +1067,47 @@ class CameraSession(
                 },
             )
         }
+        updatePortraitPreview()
+    }
+
+    /** Runs the live portrait while a custom portrait is bound and the app is on screen; stops it otherwise. */
+    private fun updatePortraitPreview() {
+        val analysis = imageAnalysis
+        if (!customPortraitBound || !uiVisible || analysis == null || camera == null) {
+            stopPortraitPreview()
+            return
+        }
+        if (portraitAnalysis === analysis) return
+        val preview = portraitPreview.value ?: PortraitPreview(subjectMasker, scope) { _portraitBlur.value }.also { portraitPreview.value = it }
+        // The preview shows a front camera mirrored, whatever the saved photos do.
+        preview.start(analysis, mirrored = _state.value.lensFacing == LENS_FACING_FRONT)
+        portraitAnalysis = analysis
+    }
+
+    private fun stopPortraitPreview() {
+        portraitAnalysis = null
+        portraitPreview.value?.stop()
+    }
+
+    private suspend fun customPortraitAvailable(): Boolean =
+        customPortraitAvailable ?: withContext(Dispatchers.Default) {
+            portraitAvailable({ Log.w(TAG, "Custom portrait unavailable", it) }) { subjectMasker.available }
+        }
+            .also { customPortraitAvailable = it }
+
+    /** Fire and forget: without the segmentation model a portrait is saved as an ordinary photo until it arrives. */
+    private fun startPortraitModelDownload() {
+        scope.launch {
+            try {
+                subjectMasker.ensureModel()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Requesting the portrait model failed", e)
+            } catch (e: LinkageError) {
+                Log.w(TAG, "Requesting the portrait model failed", e)
+            }
+        }
     }
 
     /** Loaded once; a phone without maker Extensions (or a failure loading them) yields null. */
@@ -1015,10 +1139,14 @@ class CameraSession(
                     val error = cameraState.error
                     if (error != null) {
                         _state.update { it.copy(status = SessionStatus.ERROR, errorMessage = describe(error.code)) }
+                        // A stale blurred frame must not stay over the preview; it starts again once the camera opens.
+                        stopPortraitPreview()
                         // The Recorder ends a video on its own; a time-lapse keeps what it has.
                         if (_state.value.recording?.kind == RecordingKind.TIMELAPSE) stopTimelapse()
                     } else if (cameraState.type == CameraState.Type.OPEN) {
                         _state.update { it.copy(status = SessionStatus.READY, errorMessage = null) }
+                        // Back from an error without a new bind: the live portrait starts again.
+                        updatePortraitPreview()
                     }
                 }
             }
@@ -1039,7 +1167,8 @@ class CameraSession(
 
     private fun applyTargetRotation() {
         imageCapture?.targetRotation = targetRotation
-        imageAnalysis?.targetRotation = targetRotation
+        // The live portrait is drawn over the preview, so its frames turn with the display, not the device.
+        imageAnalysis?.targetRotation = boundKey?.displayRotation?.takeIf { customPortraitBound } ?: targetRotation
         videoCapture?.targetRotation = targetRotation
     }
 
@@ -1071,6 +1200,7 @@ class CameraSession(
     private fun cameraId(camera: Camera): String = Camera2CameraInfo.from(camera.cameraInfo).cameraId
 
     private fun fail(message: String) {
+        stopPortraitPreview()
         camera = null
         boundKey = null
         _state.update { it.copy(status = SessionStatus.ERROR, errorMessage = message) }
@@ -1140,9 +1270,13 @@ class CameraSession(
         /**
          * Analysis frames near 1080p for a time-lapse: enough for video, cheap to convert every interval.
          * Near 1280×960 for a panorama: frames are kept at most 960 px tall anyway.
+         * Near 960×720 for the live portrait: it is blurred at 480 px tall.
          */
-        fun analysisSize(mode: CaptureMode): android.util.Size =
-            if (mode == CaptureMode.PANORAMA) android.util.Size(1280, 960) else android.util.Size(1920, 1080)
+        fun analysisSize(mode: CaptureMode): android.util.Size = when (mode) {
+            CaptureMode.PANORAMA -> android.util.Size(1280, 960)
+            CaptureMode.PORTRAIT -> android.util.Size(960, 720)
+            else -> android.util.Size(1920, 1080)
+        }
 
         fun analysisResolution(aspect: Int, size: android.util.Size): ResolutionSelector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy(aspect, AspectRatioStrategy.FALLBACK_RULE_AUTO))

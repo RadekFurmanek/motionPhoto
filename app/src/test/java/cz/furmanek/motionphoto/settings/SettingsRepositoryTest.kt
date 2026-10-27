@@ -58,6 +58,8 @@ class SettingsRepositoryTest {
                 slowMotionFps = 240,
                 hdr = true,
                 timelapseIntervalMs = 5000,
+                portraitResolution = PortraitResolution.STANDARD,
+                portraitBlur = 0.02f,
             )
         }
 
@@ -74,7 +76,12 @@ class SettingsRepositoryTest {
         assertEquals(240, reloaded.slowMotionFps)
         assertEquals(true, reloaded.hdr)
         assertEquals(5000L, reloaded.timelapseIntervalMs)
+        assertEquals(PortraitResolution.STANDARD, reloaded.portraitResolution)
+        assertEquals(0.02f, reloaded.portraitBlur, 0f)
     }
+
+    @Test
+    fun `portrait blur defaults to the standard strength`() = assertEquals(0.012f, CameraSettings().portraitBlur, 0f)
 
     @Test
     fun `unknown stored enum value falls back to the default`() = runBlocking {

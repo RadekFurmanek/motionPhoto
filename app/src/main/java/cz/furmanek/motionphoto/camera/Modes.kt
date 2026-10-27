@@ -14,12 +14,16 @@ fun availableModes(capabilities: CameraCapabilities, lensFacing: Int): List<Capt
         CaptureMode.VIDEO -> capabilities.videoQualities.isNotEmpty()
         CaptureMode.PHOTO -> true
         CaptureMode.SLOW_MOTION -> capabilities.slowMotionFps.isNotEmpty()
-        CaptureMode.PORTRAIT -> ExtensionMode.BOKEH in capabilities.extensionModes
+        CaptureMode.PORTRAIT -> ExtensionMode.BOKEH in capabilities.extensionModes || capabilities.customPortrait
         CaptureMode.NIGHT -> ExtensionMode.NIGHT in capabilities.extensionModes
         CaptureMode.TIMELAPSE -> true
         CaptureMode.PANORAMA -> lensFacing == LENS_FACING_BACK && capabilities.hasRotationVector && capabilities.hasOptics
     }
 }
+
+/** Portrait made by the app rather than the maker: the maker's bokeh wins wherever the camera has it. */
+fun usesCustomPortrait(mode: CaptureMode, capabilities: CameraCapabilities): Boolean =
+    mode == CaptureMode.PORTRAIT && ExtensionMode.BOKEH !in capabilities.extensionModes && capabilities.customPortrait
 
 /** A stored mode this camera cannot do (other phone, other lens) falls back to Photo. */
 fun fallbackMode(requested: CaptureMode, available: List<CaptureMode>): CaptureMode =

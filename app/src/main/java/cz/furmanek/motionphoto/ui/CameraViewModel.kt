@@ -3,6 +3,7 @@ package cz.furmanek.motionphoto.ui
 import android.app.Application
 import androidx.camera.core.MeteringPointFactory
 import androidx.camera.core.Preview
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import cz.furmanek.motionphoto.MotionPhotoApp
@@ -29,6 +30,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val settings: StateFlow<CameraSettings> =
         settingsRepository.settings.stateIn(viewModelScope, SharingStarted.Eagerly, CameraSettings())
     val events: Flow<SessionEvent> = session.events
+
+    /** The live portrait's blurred background over the preview; null shows the preview alone. */
+    val portraitFrame: Flow<ImageBitmap?> = session.portraitFrame
+
+    /** The custom portrait's background blur, a fraction of the longer side. */
+    val portraitBlur: StateFlow<Float> = session.portraitBlur
+
+    fun setPortraitBlur(fraction: Float) = session.setPortraitBlur(fraction)
+
+    fun persistPortraitBlur() = session.persistPortraitBlur()
 
     fun attachPreview(
         surfaceProvider: Preview.SurfaceProvider,

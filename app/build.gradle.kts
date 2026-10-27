@@ -19,8 +19,8 @@ android {
         // Scoped storage (MediaStore RELATIVE_PATH / IS_PENDING) needs API 29.
         minSdk = 29
         targetSdk = 37
-        versionCode = 6
-        versionName = "0.5.1"
+        versionCode = 7
+        versionName = "0.6.0"
     }
 
     signingConfigs {
@@ -73,6 +73,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.exifinterface)
+    implementation(libs.mlkit.subject.segmentation)
+    implementation(libs.play.services.base)
+    implementation(libs.kotlinx.coroutines.play.services)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

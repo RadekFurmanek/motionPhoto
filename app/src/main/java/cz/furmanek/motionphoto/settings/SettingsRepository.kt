@@ -5,9 +5,11 @@ import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import cz.furmanek.motionphoto.portrait.clampBlur
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -42,6 +44,8 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             slowMotionFps = prefs[Keys.SLOW_MOTION_FPS] ?: defaults.slowMotionFps,
             hdr = prefs[Keys.HDR] ?: defaults.hdr,
             timelapseIntervalMs = prefs[Keys.TIMELAPSE_INTERVAL] ?: defaults.timelapseIntervalMs,
+            portraitResolution = prefs.enum(Keys.PORTRAIT_RESOLUTION, defaults.portraitResolution),
+            portraitBlur = clampBlur(prefs[Keys.PORTRAIT_BLUR] ?: defaults.portraitBlur),
         )
     }
 
@@ -64,6 +68,8 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         prefs[Keys.SLOW_MOTION_FPS] = settings.slowMotionFps
         prefs[Keys.HDR] = settings.hdr
         prefs[Keys.TIMELAPSE_INTERVAL] = settings.timelapseIntervalMs
+        prefs[Keys.PORTRAIT_RESOLUTION] = settings.portraitResolution.name
+        prefs[Keys.PORTRAIT_BLUR] = settings.portraitBlur
     }
 
     private inline fun <reified E : Enum<E>> Preferences.enum(key: Preferences.Key<String>, default: E): E =
@@ -88,5 +94,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val SLOW_MOTION_FPS = intPreferencesKey("slow_motion_fps")
         val HDR = booleanPreferencesKey("hdr")
         val TIMELAPSE_INTERVAL = longPreferencesKey("timelapse_interval_ms")
+        val PORTRAIT_RESOLUTION = stringPreferencesKey("portrait_resolution")
+        val PORTRAIT_BLUR = floatPreferencesKey("portrait_blur")
     }
 }

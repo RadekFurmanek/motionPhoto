@@ -32,7 +32,7 @@ object CapabilityProbe {
 
     /**
      * [extensions] is null when the maker offers no Extensions or they failed to load. [hasRotationVector]
-     * comes from the phone's sensors, not the camera.
+     * comes from the phone's sensors and [customPortrait] from Google Play services, not the camera.
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun probe(
@@ -41,6 +41,7 @@ object CapabilityProbe {
         selector: CameraSelector,
         extensions: ExtensionsManager?,
         hasRotationVector: Boolean,
+        customPortrait: Boolean,
     ): CameraCapabilities {
         val videoCapabilities = Recorder.getVideoCapabilities(cameraInfo)
         val qualities = videoCapabilities.getSupportedQualities(DynamicRange.SDR)
@@ -77,6 +78,7 @@ object CapabilityProbe {
                 ?.firstOrNull() ?: 0f,
             sensorWidthMm = sensorSize?.width ?: 0f,
             sensorHeightMm = sensorSize?.height ?: 0f,
+            customPortrait = customPortrait,
         )
     }
 

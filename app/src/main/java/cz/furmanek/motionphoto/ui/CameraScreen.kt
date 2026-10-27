@@ -11,6 +11,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -54,8 +55,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -74,12 +77,14 @@ import cz.furmanek.motionphoto.camera.SessionEvent
 import cz.furmanek.motionphoto.camera.SessionStatus
 import cz.furmanek.motionphoto.camera.availableModes
 import cz.furmanek.motionphoto.camera.isVideo
+import cz.furmanek.motionphoto.camera.usesCustomPortrait
 import cz.furmanek.motionphoto.camera.zoomPresets
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.settings.CaptureMode
 import cz.furmanek.motionphoto.settings.LENS_FACING_BACK
 import cz.furmanek.motionphoto.timelapse.timelapseOutputDurationMs
 import cz.furmanek.motionphoto.settings.effectiveLivePhoto
+import cz.furmanek.motionphoto.ui.components.BlurSlider
 import cz.furmanek.motionphoto.ui.components.ExposureSlider
 import cz.furmanek.motionphoto.ui.components.GridOverlay
 import cz.furmanek.motionphoto.ui.components.LastCaptureThumbnail
@@ -94,6 +99,7 @@ import cz.furmanek.motionphoto.ui.components.ZoomChips
 import cz.furmanek.motionphoto.ui.components.outputAspect
 import kotlin.math.abs
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collectLatest
 
 private const val FOCUS_INDICATOR_VISIBLE_MS = 1_200L
@@ -150,7 +156,8 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                         MediaKind.PANORAMA -> R.string.saved_panorama
                     }
                     val result = snackbarHostState.showSnackbar(
-                        message = resources.getString(message),
+                        // A notice (portrait saved as an ordinary photo) says more than "saved".
+                        message = event.notice ?: resources.getString(message),
                         actionLabel = resources.getString(R.string.view),
                         withDismissAction = true,
                         duration = SnackbarDuration.Short,
@@ -177,6 +184,17 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
         delay(EXPOSURE_SLIDER_VISIBLE_MS)
         exposureVisible = false
     }
+    // Held in PORTRÉT with our own portrait: the maker's bokeh has no strength to set.
+    var blurInteraction by remember { mutableIntStateOf(0) }
+    var blurVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(blurInteraction) {
+        delay(EXPOSURE_SLIDER_VISIBLE_MS)
+        blurVisible = false
+    }
+    // Coming back to PORTRÉT quickly must not find the slider still open.
+    LaunchedEffect(settings.mode) { blurVisible = false }
+    val customPortrait = capabilities != null && usesCustomPortrait(settings.mode, capabilities)
+    val canAdjustBlur = customPortrait && !state.busy && state.panorama == null
     val exposureRange = capabilities?.exposureRange
     val canAdjustExposure = exposureRange != null && exposureRange.first < exposureRange.last
 
@@ -187,17 +205,30 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
     ) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
 
+        PortraitOverlay(viewModel.portraitFrame, Modifier.fillMaxSize())
+
         // Taps go to the PreviewView's metering factory, which uses the same coordinates as this overlay.
         // The transform detector comes after the tap detector, so it sees pinches first and consumes them.
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(viewModel) {
-                    detectTapGestures { offset ->
+                .pointerInput(viewModel, canAdjustBlur) {
+                    detectTapGestures(
+                        onLongPress = if (canAdjustBlur) {
+                            {
+                                exposureVisible = false
+                                blurVisible = true
+                                blurInteraction++
+                            }
+                        } else {
+                            null
+                        },
+                    ) { offset ->
                         // Re-metering during a panorama would show in the stitched result.
                         if (state.panorama != null) return@detectTapGestures
                         focusPoint = offset
                         focusTapCount++
+                        blurVisible = false
                         exposureVisible = true
                         exposureInteraction++
                         viewModel.focusAt(offset.x, offset.y)
@@ -263,7 +294,15 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 .padding(bottom = 16.dp),
             viewModel = viewModel,
             exposureSlider = {
-                if (exposureVisible && canAdjustExposure && state.panorama == null) {
+                if (blurVisible && canAdjustBlur) {
+                    val blur by viewModel.portraitBlur.collectAsStateWithLifecycle()
+                    BlurSlider(
+                        fraction = blur,
+                        onChange = viewModel::setPortraitBlur,
+                        onChangeFinished = viewModel::persistPortraitBlur,
+                        onInteraction = { blurInteraction++ },
+                    )
+                } else if (exposureVisible && canAdjustExposure && state.panorama == null) {
                     ExposureSlider(
                         index = state.exposureIndex,
                         range = exposureRange,
@@ -375,7 +414,7 @@ private fun BottomControls(
                 isRecording = recording != null || panorama?.capturing == true,
                 showClipProgress = state.busy && state.countdown == null && settings.mode == CaptureMode.PHOTO &&
                     settings.effectiveLivePhoto() && state.livePhotoAvailable,
-                // The maker's portrait, night and HDR processing can take seconds.
+                // Portrait (the maker's or ours), night and HDR processing can take seconds.
                 processing = state.busy && state.countdown == null &&
                     (settings.mode == CaptureMode.PORTRAIT || settings.mode == CaptureMode.NIGHT || settings.hdr),
                 // During the self-timer the shutter cancels the countdown; a panorama being stitched cannot be stopped.
@@ -457,5 +496,18 @@ private fun Context.openMedia(uri: Uri) {
         startActivity(intent)
     } catch (_: ActivityNotFoundException) {
         // No gallery app installed; the capture is still saved in DCIM/Camera.
+    }
+}
+
+/**
+ * The live portrait's blurred background: the same 3:4 frame as the preview, fitted the same way, and
+ * transparent over the subject, which stays the sharp preview. It takes no touches, so taps still focus.
+ * Collected here, so a new frame (up to 20 a second) recomposes only this overlay, not the whole screen.
+ */
+@Composable
+private fun PortraitOverlay(frames: Flow<ImageBitmap?>, modifier: Modifier = Modifier) {
+    val frame by frames.collectAsStateWithLifecycle(initialValue = null)
+    frame?.let {
+        Image(bitmap = it, contentDescription = null, contentScale = ContentScale.Fit, modifier = modifier)
     }
 }

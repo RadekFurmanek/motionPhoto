@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="app_name">Motion Photo</string>
     <string name="permission_title">Přístup k fotoaparátu</string>
     <string name="permission_rationale">Živé fotky potřebují fotoaparát. Mikrofon je volitelný – bez něj se video uloží bez zvuku.</string>
@@ -42,6 +42,7 @@
     <string name="resume">Pokračovat</string>
     <string name="last_capture">Poslední snímek</string>
     <string name="exposure">Expozice</string>
+    <string name="portrait_blur">Rozostření</string>
     <string name="back">Zpět</string>
     <string name="settings_grid">Mřížka</string>
     <string name="settings_location">Ukládat polohu</string>
@@ -90,4 +91,10 @@
     <string name="panorama_progress">Snímky: %1$d · %2$d°</string>
     <string name="panorama_start">Spustit panorama</string>
     <string name="panorama_stop">Dokončit panorama</string>
+    <string name="portrait_no_subject">Portrét se nepovedl, nic jsem nenašel – uložena běžná fotka</string>
+    <string name="portrait_model_downloading">Portrét se připravuje (stahuje se model) – uložena běžná fotka</string>
+    <string name="portrait_failed">Portrét se nepovedl – uložena běžná fotka</string>
+    <string name="settings_portrait_resolution">Rozlišení portrétu</string>
+    <string name="portrait_resolution_full">Plné</string>
+    <string name="portrait_resolution_standard">Standardní (12 Mpx)</string>
 </resources>

@@ -18,10 +18,12 @@ import androidx.core.content.ContextCompat
 import cz.furmanek.motionphoto.media.MediaKind
 import cz.furmanek.motionphoto.media.MediaStoreWriter
 import cz.furmanek.motionphoto.media.SavedMedia
+import cz.furmanek.motionphoto.portrait.PORTRAIT_TEMP_PREFIX
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -83,18 +85,37 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
         }
     }
 
+    /**
+     * [process], when given, may rewrite the still in place before it is saved (custom portrait). Once the still
+     * is taken, processing and saving finish even if the caller is cancelled, so the shot is never lost.
+     */
     suspend fun capturePhoto(
         imageCapture: ImageCapture,
         capturedAtMillis: Long,
         mirrored: Boolean,
         location: Deferred<Location?>,
+        process: (suspend (File) -> Unit)? = null,
     ): SavedMedia {
         val stillFile = withContext(Dispatchers.IO) { File.createTempFile(TEMP_STILL_PREFIX, ".jpg", context.cacheDir) }
         try {
             imageCapture.takePictureTo(stillFile, mirrored)
-            val location = location.await()
-            return withContext(Dispatchers.IO) {
-                SavedMedia(writer.savePhoto(stillFile, capturedAtMillis, location), MediaKind.PHOTO)
+            if (process == null) {
+                val location = location.await()
+                return withContext(Dispatchers.IO) {
+                    SavedMedia(writer.savePhoto(stillFile, capturedAtMillis, location), MediaKind.PHOTO)
+                }
+            }
+            return withContext(NonCancellable) {
+                process(stillFile)
+                // A cancelled caller cancels the location lookup too; the photo is then saved without it.
+                val savedLocation = try {
+                    location.await()
+                } catch (_: CancellationException) {
+                    null
+                }
+                withContext(Dispatchers.IO) {
+                    SavedMedia(writer.savePhoto(stillFile, capturedAtMillis, savedLocation), MediaKind.PHOTO)
+                }
             }
         } finally {
             withContext(NonCancellable + Dispatchers.IO) { stillFile.delete() }
@@ -194,13 +215,14 @@ class PhotoCapture(private val context: Context, private val writer: MediaStoreW
         private const val TAG = "PhotoCapture"
         private const val TEMP_VIDEO_PREFIX = "motion_clip_"
         private const val TEMP_STILL_PREFIX = "motion_still_"
+        private val TEMP_PREFIXES = listOf(TEMP_VIDEO_PREFIX, TEMP_STILL_PREFIX, PORTRAIT_TEMP_PREFIX)
         private const val RECORDING_START_TIMEOUT_MS = 3_000L
         private const val RECORDING_FINALIZE_TIMEOUT_MS = 5_000L
 
         /** Removes temp files left behind by a capture the process did not finish (crash, kill, late CameraX write). */
         fun deleteTempFiles(cacheDir: File) {
             cacheDir
-                .listFiles { file -> file.name.startsWith(TEMP_VIDEO_PREFIX) || file.name.startsWith(TEMP_STILL_PREFIX) }
+                .listFiles { file -> TEMP_PREFIXES.any { file.name.startsWith(it) } }
                 ?.forEach { it.delete() }
         }
 

@@ -1,5 +1,7 @@
 package cz.furmanek.motionphoto.settings
 
+import cz.furmanek.motionphoto.portrait.PORTRAIT_BLUR_DEFAULT
+
 /** Same values as CameraSelector.LENS_FACING_*; kept here so settings stay free of CameraX. */
 const val LENS_FACING_FRONT = 0
 const val LENS_FACING_BACK = 1
@@ -12,6 +14,9 @@ enum class FlashSetting { OFF, AUTO, ON }
 enum class TimerSetting(val seconds: Int) { OFF(0), THREE(3), TEN(10) }
 
 enum class PhotoAspect { RATIO_4_3, RATIO_16_9, RATIO_1_1 }
+
+/** How large a custom portrait is: the full sensor size, or decoded down to about 12 MP. */
+enum class PortraitResolution { FULL, STANDARD }
 
 /** Ordered from lowest to highest. */
 enum class VideoQualitySetting { SD, HD, FHD, UHD }
@@ -35,6 +40,9 @@ data class CameraSettings(
     val slowMotionFps: Int = 120,
     val hdr: Boolean = false,
     val timelapseIntervalMs: Long = 1000L,
+    val portraitResolution: PortraitResolution = PortraitResolution.FULL,
+    /** Background blur of a custom portrait, a fraction of the photo's longer side. */
+    val portraitBlur: Float = PORTRAIT_BLUR_DEFAULT,
 )
 
 /**
