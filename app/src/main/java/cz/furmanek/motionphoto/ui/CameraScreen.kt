@@ -9,6 +9,7 @@ import android.view.OrientationEventListener
 import android.view.Surface
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -87,6 +88,7 @@ import cz.furmanek.motionphoto.settings.effectiveLivePhoto
 import cz.furmanek.motionphoto.ui.components.BlurSlider
 import cz.furmanek.motionphoto.ui.components.ExposureSlider
 import cz.furmanek.motionphoto.ui.components.GridOverlay
+import cz.furmanek.motionphoto.ui.components.rememberPhoneSteady
 import cz.furmanek.motionphoto.ui.components.LastCaptureThumbnail
 import cz.furmanek.motionphoto.ui.components.LensChips
 import cz.furmanek.motionphoto.ui.components.ModeBar
@@ -205,7 +207,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
     ) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
 
-        PortraitOverlay(viewModel.portraitFrame, Modifier.fillMaxSize())
+        if (customPortrait) PortraitOverlay(viewModel.portraitFrame, Modifier.fillMaxSize())
 
         // Taps go to the PreviewView's metering factory, which uses the same coordinates as this overlay.
         // The transform detector comes after the tap detector, so it sees pinches first and consumes them.
@@ -507,7 +509,10 @@ private fun Context.openMedia(uri: Uri) {
 @Composable
 private fun PortraitOverlay(frames: Flow<ImageBitmap?>, modifier: Modifier = Modifier) {
     val frame by frames.collectAsStateWithLifecycle(initialValue = null)
+    // The blurred layer lags behind the live preview, so it would slide while the phone moves: fade it out then.
+    val steady by rememberPhoneSteady()
+    val alpha by animateFloatAsState(if (steady) 1f else 0f, tween(if (steady) 250 else 120), label = "portrait-blur")
     frame?.let {
-        Image(bitmap = it, contentDescription = null, contentScale = ContentScale.Fit, modifier = modifier)
+        Image(bitmap = it, contentDescription = null, contentScale = ContentScale.Fit, alpha = alpha, modifier = modifier)
     }
 }
