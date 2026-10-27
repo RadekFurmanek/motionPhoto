@@ -13,6 +13,9 @@ enum class TimerSetting(val seconds: Int) { OFF(0), THREE(3), TEN(10) }
 
 enum class PhotoAspect { RATIO_4_3, RATIO_16_9, RATIO_1_1 }
 
+/** How large a custom portrait is: the full sensor size, or decoded down to about 12 MP. */
+enum class PortraitResolution { FULL, STANDARD }
+
 /** Ordered from lowest to highest. */
 enum class VideoQualitySetting { SD, HD, FHD, UHD }
 
@@ -35,6 +38,7 @@ data class CameraSettings(
     val slowMotionFps: Int = 120,
     val hdr: Boolean = false,
     val timelapseIntervalMs: Long = 1000L,
+    val portraitResolution: PortraitResolution = PortraitResolution.FULL,
 )
 
 /**

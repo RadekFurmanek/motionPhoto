@@ -58,6 +58,7 @@ class SettingsRepositoryTest {
                 slowMotionFps = 240,
                 hdr = true,
                 timelapseIntervalMs = 5000,
+                portraitResolution = PortraitResolution.STANDARD,
             )
         }
 
@@ -74,6 +75,7 @@ class SettingsRepositoryTest {
         assertEquals(240, reloaded.slowMotionFps)
         assertEquals(true, reloaded.hdr)
         assertEquals(5000L, reloaded.timelapseIntervalMs)
+        assertEquals(PortraitResolution.STANDARD, reloaded.portraitResolution)
     }
 
     @Test
