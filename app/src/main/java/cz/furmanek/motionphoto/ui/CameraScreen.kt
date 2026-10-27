@@ -112,7 +112,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
 
     val capabilities = state.capabilities
     val recording = state.recording
-    val locked = state.busy || recording != null
+    val locked = state.controlsLocked
     val ready = state.status == SessionStatus.READY
 
     // FIT_CENTER shows exactly the frame that is saved.
@@ -294,7 +294,7 @@ private fun BottomControls(
     val context = LocalContext.current
     val capabilities = state.capabilities
     val recording = state.recording
-    val locked = state.busy || recording != null
+    val locked = state.controlsLocked
     val ready = state.status == SessionStatus.READY
     val isVideo = settings.mode.isVideo()
     val modes = capabilities?.let { availableModes(it, state.lensFacing) } ?: DEFAULT_MODES

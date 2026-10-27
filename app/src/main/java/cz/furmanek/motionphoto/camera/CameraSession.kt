@@ -32,6 +32,7 @@ import androidx.camera.extensions.ExtensionMode
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.HighSpeedVideoSessionConfig
 import androidx.camera.lifecycle.awaitInstance
+import androidx.core.content.ContextCompat
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
@@ -122,7 +123,10 @@ data class SessionState(
     /** False when this camera cannot stream preview, still and video together; photos are then plain. */
     val livePhotoAvailable: Boolean = true,
     val panorama: PanoramaUiState? = null,
-)
+) {
+    /** A capture, recording or panorama runs: mode, camera and capture settings must not change. */
+    val controlsLocked: Boolean get() = busy || recording != null || panorama != null
+}
 
 sealed interface SessionEvent {
     data class Saved(val media: SavedMedia) : SessionEvent
@@ -229,6 +233,7 @@ class CameraSession(
         }
         scope.launch {
             settingsRepository.settings.collect { new ->
+                if (_state.value.panorama?.capturing == true && endsPanorama(settings, new)) cancelPanorama()
                 settings = new
                 settingsLoaded = true
                 applyCameraControls()
@@ -293,6 +298,8 @@ class CameraSession(
 
     /** Glides to [ratio] (a zoom preset), one zoom step per frame. */
     fun animateZoomTo(ratio: Float) {
+        // A panorama is pinned to 1×: its optics are fixed at start and zoom multiplies frames and memory.
+        if (_state.value.panorama != null) return
         val camera = camera ?: return
         val zoom = camera.cameraInfo.zoomState.value ?: return
         val target = ratio.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio)
@@ -307,6 +314,7 @@ class CameraSession(
 
     /** Multiplies the zoom by [scaleFactor] (pinch); stops a running glide so the fingers win. */
     fun zoomBy(scaleFactor: Float) {
+        if (_state.value.panorama != null) return
         val camera = camera ?: return
         val zoom = camera.cameraInfo.zoomState.value ?: return
         zoomJob?.cancel()
@@ -399,12 +407,14 @@ class CameraSession(
 
     /** The shutter of the current mode: photo (or self-timer), start/stop a video or a panorama. */
     fun onShutter() {
-        when {
-            settings.mode == CaptureMode.PANORAMA ->
-                if (_state.value.panorama?.capturing == true) finishPanorama() else startPanorama()
-            settings.mode.isVideo().not() -> takePhoto()
-            _state.value.recording != null -> stopRecording()
-            else -> startRecording()
+        val current = _state.value
+        when (shutterAction(settings.mode, current.recording != null, current.panorama)) {
+            ShutterAction.FINISH_PANORAMA -> finishPanorama()
+            ShutterAction.START_PANORAMA -> startPanorama()
+            ShutterAction.PHOTO -> takePhoto()
+            ShutterAction.STOP_RECORDING -> stopRecording()
+            ShutterAction.START_RECORDING -> startRecording()
+            ShutterAction.NONE -> Unit
         }
     }
 
@@ -544,13 +554,25 @@ class CameraSession(
         } else {
             capabilities.sensorHeightMm
         }
-        // Zoom crops every stream, which acts like a longer lens.
-        val focalMm = capabilities.focalMm * (camera.cameraInfo.zoomState.value?.zoomRatio ?: 1f)
+        // Zoom multiplies the frame count and the canvas, so the panorama runs at 1× (or the nearest the camera
+        // allows). Zoom crops every stream, which acts like a longer lens.
+        val zoom = camera.cameraInfo.zoomState.value
+        val zoomRatio = zoom?.let { 1f.coerceIn(it.minZoomRatio, it.maxZoomRatio) } ?: 1f
+        val focalMm = capabilities.focalMm * zoomRatio
         val fovDeg = Math.toDegrees(2 * atan(sensorMm / (2.0 * focalMm))).toFloat()
         val stepDeg = fovDeg / PANORAMA_STEPS_PER_FOV
-        panoramaOptics = PanoramaOptics(focalMm, sensorMm, System.currentTimeMillis())
+        val optics = PanoramaOptics(focalMm, sensorMm, System.currentTimeMillis())
+        panoramaOptics = optics
         _state.update { it.copy(panorama = PanoramaUiState(capturing = true, yawToNextDeg = stepDeg)) }
-        panoramaCapture.start(analysis, stepDeg, ::onPanoramaStatus, onFinished = ::finishPanorama)
+        zoomJob?.cancel()
+        requestedZoomRatio = zoomRatio
+        // Frames are taken only once the zoom has settled; a stop or cancel in between leaves nothing to start.
+        val zoomed = camera.cameraControl.setZoomRatio(zoomRatio)
+        zoomed.addListener({
+            if (panoramaOptics === optics && _state.value.panorama?.capturing == true) {
+                panoramaCapture.start(analysis, stepDeg, ::onPanoramaStatus, onFinished = ::finishPanorama)
+            }
+        }, ContextCompat.getMainExecutor(app))
     }
 
     private fun onPanoramaStatus(status: PanoramaStatus) {
@@ -681,7 +703,7 @@ class CameraSession(
         if (settings.shutterSoundRequired(shutterSoundMandatory)) shutterSound.play(sound)
     }
 
-    private fun isLocked(): Boolean = _state.value.busy || _state.value.recording != null || _state.value.panorama != null
+    private fun isLocked(): Boolean = _state.value.controlsLocked
 
     private fun updateLifecycle() {
         registry.currentState = if (uiVisible || _state.value.recording != null) {

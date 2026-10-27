@@ -25,6 +25,25 @@ fun availableModes(capabilities: CameraCapabilities, lensFacing: Int): List<Capt
 fun fallbackMode(requested: CaptureMode, available: List<CaptureMode>): CaptureMode =
     if (requested in available) requested else CaptureMode.PHOTO
 
+enum class ShutterAction { PHOTO, START_RECORDING, STOP_RECORDING, START_PANORAMA, FINISH_PANORAMA, NONE }
+
+/**
+ * What the shutter does. A running panorama goes first: it must stay stoppable whatever the settings say,
+ * and nothing happens while one is being stitched.
+ */
+fun shutterAction(mode: CaptureMode, recording: Boolean, panorama: PanoramaUiState?): ShutterAction = when {
+    panorama?.capturing == true -> ShutterAction.FINISH_PANORAMA
+    panorama != null -> ShutterAction.NONE
+    mode == CaptureMode.PANORAMA -> ShutterAction.START_PANORAMA
+    !mode.isVideo() -> ShutterAction.PHOTO
+    recording -> ShutterAction.STOP_RECORDING
+    else -> ShutterAction.START_RECORDING
+}
+
+/** A panorama cannot carry on in another mode or on another camera. */
+fun endsPanorama(old: CameraSettings, new: CameraSettings): Boolean =
+    new.mode != CaptureMode.PANORAMA || new.lensFacing != old.lensFacing
+
 /** Modes whose shutter starts and stops a recording. */
 fun CaptureMode.isVideo(): Boolean =
     this == CaptureMode.VIDEO || this == CaptureMode.SLOW_MOTION || this == CaptureMode.TIMELAPSE
