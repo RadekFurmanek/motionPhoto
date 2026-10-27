@@ -95,6 +95,7 @@ import cz.furmanek.motionphoto.ui.components.LastCaptureThumbnail
 import cz.furmanek.motionphoto.ui.components.LensChips
 import cz.furmanek.motionphoto.ui.components.ModeBar
 import cz.furmanek.motionphoto.ui.components.PanoramaGuide
+import cz.furmanek.motionphoto.ui.components.PanoramaLevel
 import cz.furmanek.motionphoto.ui.components.PanoramaStitching
 import cz.furmanek.motionphoto.ui.components.QuickSettingsBar
 import cz.furmanek.motionphoto.ui.components.RecordingIndicator
@@ -248,6 +249,9 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
             focusPoint?.let { FocusIndicator(position = it, key = focusTapCount) }
         }
 
+        if (settings.mode == CaptureMode.PANORAMA && state.panorama?.stitchingProgress == null) {
+            PanoramaLevel(viewModel.panoramaAttitude, state.panorama, Modifier.fillMaxSize())
+        }
         state.panorama?.let { panorama ->
             val stitching = panorama.stitchingProgress
             if (panorama.capturing) {
