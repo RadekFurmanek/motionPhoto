@@ -137,9 +137,12 @@ class DirectCamera(context: Context, val cameraId: String) {
         } catch (e: IllegalArgumentException) {
             throw DirectCameraException("camera $cameraId refused", e)
         }
-        return withTimeoutOrNull(OPEN_TIMEOUT_MS) { opened.await() } ?: run {
+        try {
+            return withTimeoutOrNull(OPEN_TIMEOUT_MS) { opened.await() }
+                ?: throw DirectCameraException("camera $cameraId did not open")
+        } finally {
+            // Timed out or cancelled (the user left): a late onOpened then finds this done and closes its camera.
             opened.cancel()
-            throw DirectCameraException("camera $cameraId did not open")
         }
     }
 
