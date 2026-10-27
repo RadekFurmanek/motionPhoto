@@ -60,6 +60,8 @@ fun QuickSettingsBar(
     onUpdate: ((CameraSettings) -> CameraSettings) -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
+    /** The hidden camera shows: only a plain 4:3 photo without flash, so those controls are greyed. */
+    direct: Boolean = false,
 ) {
     val hasFlash = capabilities?.hasFlash == true
     Row(
@@ -69,16 +71,16 @@ fun QuickSettingsBar(
     ) {
         when (settings.mode) {
             CaptureMode.PHOTO -> {
-                if (hasFlash) FlashButton(settings, locked, onUpdate)
+                if (hasFlash) FlashButton(settings, locked || direct, onUpdate)
                 TimerButton(settings, locked, onUpdate)
-                BarText(stringResource(settings.aspect.labelRes()), stringResource(R.string.aspect_ratio), enabled = !locked) {
+                BarText(stringResource(settings.aspect.labelRes()), stringResource(R.string.aspect_ratio), enabled = !locked && !direct) {
                     onUpdate { it.copy(aspect = PhotoAspect.entries.next(it.aspect)) }
                 }
                 if (ExtensionMode.HDR in capabilities?.extensionModes.orEmpty()) {
                     BarIcon(
                         if (settings.hdr) Icons.Filled.HdrOn else Icons.Filled.HdrOff,
                         stringResource(R.string.hdr),
-                        enabled = !locked,
+                        enabled = !locked && !direct,
                         highlighted = settings.hdr,
                     ) {
                         onUpdate { it.withHdr(!it.hdr) }
@@ -90,7 +92,7 @@ fun QuickSettingsBar(
                     BarIcon(
                         if (settings.effectiveLivePhoto()) Icons.Filled.MotionPhotosOn else Icons.Filled.MotionPhotosOff,
                         stringResource(R.string.live_photo),
-                        enabled = !locked,
+                        enabled = !locked && !direct,
                         highlighted = settings.effectiveLivePhoto(),
                     ) {
                         onUpdate { it.withLivePhoto(!it.livePhoto) }

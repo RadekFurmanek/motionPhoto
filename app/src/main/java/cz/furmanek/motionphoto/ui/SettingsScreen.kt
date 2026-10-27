@@ -209,6 +209,7 @@ fun SettingsScreen(
                 )
                 when (val macro = capabilities.macro) {
                     is MacroSetup.Lens -> InfoRow(stringResource(R.string.macro_uses_lens, macro.physicalId ?: macro.cameraId))
+                    is MacroSetup.Hidden -> InfoRow(stringResource(R.string.macro_uses_lens, macro.cameraId))
                     is MacroSetup.Zoomed -> InfoRow(stringResource(R.string.macro_uses_zoom, formatZoom(macro.zoomRatio)))
                     null -> Unit
                 }

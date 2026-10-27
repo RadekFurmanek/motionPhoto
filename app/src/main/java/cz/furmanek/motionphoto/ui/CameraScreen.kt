@@ -4,9 +4,11 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.view.OrientationEventListener
 import android.view.Surface
+import android.view.TextureView
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
@@ -23,6 +25,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -60,6 +63,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -210,6 +215,9 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
             .background(Color.Black),
     ) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+        if (state.direct != null) {
+            DirectPreview(viewModel::attachDirectSurface, viewModel::setDirectBounds, Modifier.fillMaxSize())
+        }
 
         if (customPortrait) PortraitOverlay(viewModel.portraitFrame, Modifier.fillMaxSize())
 
@@ -284,6 +292,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 livePhotoAvailable = state.livePhotoAvailable,
                 onUpdate = viewModel::updateSettings,
                 onOpenSettings = { showSettings = true },
+                direct = state.direct != null,
             )
             recording?.let {
                 RecordingIndicator(
@@ -400,7 +409,12 @@ private fun BottomControls(
                 if (macroOffered) MacroChip(active = state.macro, onClick = { if (!locked) viewModel.setMacro(!state.macro) })
                 // Macro picks its own lens and zoom.
                 if (!state.macro) {
-                    ZoomChips(zoomPresets(capabilities.minZoom, capabilities.maxZoom), state.zoomRatio, onSelect = viewModel::setZoom)
+                    val ultraWideZoom = capabilities.ultraWideZoom.takeIf { settings.mode == CaptureMode.PHOTO && state.lensFacing == LENS_FACING_BACK }
+                    ZoomChips(
+                        zoomPresets(capabilities.minZoom, capabilities.maxZoom, ultraWideZoom),
+                        state.zoomRatio,
+                        onSelect = { if (!locked) viewModel.setZoom(it) },
+                    )
                 }
             }
         }
@@ -518,6 +532,46 @@ private fun Context.openMedia(uri: Uri) {
         startActivity(intent)
     } catch (_: ActivityNotFoundException) {
         // No gallery app installed; the capture is still saved in DCIM/Camera.
+    }
+}
+
+/**
+ * The hidden camera's preview: a 4:3 frame upright and centred like the CameraX preview, so the overlays line up.
+ * Its texture goes to the session, which opens the camera once it has one; its place goes there too, for taps.
+ */
+@Composable
+private fun DirectPreview(
+    onTexture: (SurfaceTexture?) -> Unit,
+    onBounds: (Float, Float, Float, Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
+        AndroidView(
+            factory = { context ->
+                TextureView(context).apply {
+                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                        override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) = onTexture(texture)
+
+                        override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) = Unit
+
+                        override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+                            // The session closes the camera before the texture is released.
+                            onTexture(null)
+                            return true
+                        }
+
+                        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+                    }
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(3f / 4f)
+                .onGloballyPositioned { coordinates ->
+                    val position = coordinates.positionInParent()
+                    onBounds(position.x, position.y, coordinates.size.width.toFloat(), coordinates.size.height.toFloat())
+                },
+        )
     }
 }
 
