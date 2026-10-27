@@ -165,7 +165,7 @@ class PortraitProcessor(private val masker: SubjectMasker) {
 
         /** Mask feathering and background blur radii as fractions of the mask's longer side. */
         const val MASK_FEATHER = 0.01f
-        const val BACKGROUND_BLUR = 0.025f
+        const val BACKGROUND_BLUR = 0.012f
 
         fun radius(longestSide: Int, fraction: Float): Int = max(1, (longestSide * fraction).roundToInt())
 
