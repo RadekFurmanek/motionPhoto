@@ -1,5 +1,6 @@
 package cz.furmanek.motionphoto.portrait
 
+import androidx.exifinterface.media.ExifInterface
 import cz.furmanek.motionphoto.panorama.Raster
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -93,22 +94,40 @@ private fun bilinearChannel(p00: Int, p10: Int, p01: Int, p11: Int, shift: Int, 
 }
 
 /**
- * Index in a [width] x [height] image of the pixel that lands at [index] after turning it clockwise by
- * [degrees] (0, 90, 180 or 270) and then, if [flip], mirroring it left to right.
- * This is how EXIF orientation turns stored pixels upright (ExifInterface rotationDegrees and isFlipped).
+ * Index in a [width] x [height] image of the pixel that lands at [index] after, if [flip], mirroring it
+ * left to right and then turning it clockwise by [degrees] (0, 90, 180 or 270).
+ * This is how EXIF orientation turns stored pixels upright; see [exifTurn].
  */
 private fun uprightSource(index: Int, width: Int, height: Int, degrees: Int, flip: Boolean): Int {
     val turned = degrees == 90 || degrees == 270
     val outWidth = if (turned) height else width
-    val outHeight = if (turned) width else height
+    val x = index % outWidth
     val y = index / outWidth
-    val x = (index % outWidth).let { if (flip) outWidth - 1 - it else it }
-    return when (degrees) {
-        0 -> y * width + x
-        90 -> (height - 1 - x) * width + y
-        180 -> (outHeight - 1 - y) * width + (width - 1 - x)
-        else -> x * width + (width - 1 - y)
+    // Where (x, y) of the turned image comes from in the (possibly mirrored) stored image.
+    val sourceX: Int
+    val sourceY: Int
+    when (degrees) {
+        0 -> { sourceX = x; sourceY = y }
+        90 -> { sourceX = y; sourceY = height - 1 - x }
+        180 -> { sourceX = width - 1 - x; sourceY = height - 1 - y }
+        else -> { sourceX = width - 1 - y; sourceY = x }
     }
+    return sourceY * width + if (flip) width - 1 - sourceX else sourceX
+}
+
+/**
+ * The clockwise turn and left-right mirror (applied first) that make stored pixels upright for an EXIF
+ * [orientation] tag value; the same pairs as ExifInterface rotationDegrees and isFlipped.
+ */
+fun exifTurn(orientation: Int): Pair<Int, Boolean> = when (orientation) {
+    ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> 0 to true
+    ExifInterface.ORIENTATION_ROTATE_180 -> 180 to false
+    ExifInterface.ORIENTATION_FLIP_VERTICAL -> 180 to true
+    ExifInterface.ORIENTATION_TRANSPOSE -> 270 to true
+    ExifInterface.ORIENTATION_ROTATE_90 -> 90 to false
+    ExifInterface.ORIENTATION_TRANSVERSE -> 90 to true
+    ExifInterface.ORIENTATION_ROTATE_270 -> 270 to false
+    else -> 0 to false
 }
 
 private fun normalizedTurn(degrees: Int): Int {
@@ -121,7 +140,7 @@ private fun normalizedTurn(degrees: Int): Int {
 fun turnedSize(width: Int, height: Int, degrees: Int): Pair<Int, Int> =
     if (normalizedTurn(degrees) % 180 == 0) width to height else height to width
 
-/** Turns stored ARGB [pixels] upright: clockwise by [degrees], then mirrored left to right if [flip]. */
+/** Turns stored ARGB [pixels] upright: mirrored left to right if [flip], then clockwise by [degrees]. */
 fun storedToUpright(pixels: IntArray, width: Int, height: Int, degrees: Int, flip: Boolean): IntArray {
     require(pixels.size == width * height) { "Expected ${width * height} pixels, got ${pixels.size}" }
     val turn = normalizedTurn(degrees)

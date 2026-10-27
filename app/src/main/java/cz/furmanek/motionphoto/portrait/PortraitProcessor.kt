@@ -29,9 +29,8 @@ class PortraitProcessor(private val masker: SubjectMasker) {
         var temp: File? = null
         try {
             // Pixels stay as stored (not rotated) and the EXIF orientation is kept; only the segmenter sees them upright.
-            val exif = ExifInterface(jpeg)
-            val degrees = exif.rotationDegrees
-            val flipped = exif.isFlipped
+            val orientation = ExifInterface(jpeg).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            val (degrees, flipped) = exifTurn(orientation)
             // On API 26+ a decode that runs out of native memory returns null instead of throwing.
             photo = decode(jpeg, resolution) ?: return@withContext when (resolution) {
                 PortraitResolution.FULL -> PortraitOutcome.OUT_OF_MEMORY

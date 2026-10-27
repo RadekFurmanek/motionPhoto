@@ -1,5 +1,6 @@
 package cz.furmanek.motionphoto.portrait
 
+import androidx.exifinterface.media.ExifInterface
 import cz.furmanek.motionphoto.panorama.Raster
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -138,16 +139,33 @@ class PortraitMathTest {
         assertArrayEquals(intArrayOf(4, 2, 0, 5, 3, 1), storedToUpright(pixels, 2, 3, 90, false))
     }
 
+    /**
+     * How each EXIF orientation displays the stored 2 x 3 image `0 1 / 2 3 / 4 5`, straight from the EXIF
+     * definitions (e.g. transpose: upright(x, y) = stored(y, x)), driven through [exifTurn] as the processor does.
+     */
     @Test
-    fun `exif transpose swaps rows and columns`() {
-        // EXIF orientation 5: rotationDegrees 90, flipped; upright(x, y) = stored(y, x).
-        assertArrayEquals(intArrayOf(0, 2, 4, 1, 3, 5), storedToUpright(IntArray(6) { it }, 2, 3, 90, true))
+    fun `every exif orientation turns stored pixels upright`() {
+        val expected = mapOf(
+            ExifInterface.ORIENTATION_NORMAL to intArrayOf(0, 1, 2, 3, 4, 5),
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL to intArrayOf(1, 0, 3, 2, 5, 4),
+            ExifInterface.ORIENTATION_ROTATE_180 to intArrayOf(5, 4, 3, 2, 1, 0),
+            ExifInterface.ORIENTATION_FLIP_VERTICAL to intArrayOf(4, 5, 2, 3, 0, 1),
+            ExifInterface.ORIENTATION_TRANSPOSE to intArrayOf(0, 2, 4, 1, 3, 5),
+            ExifInterface.ORIENTATION_ROTATE_90 to intArrayOf(4, 2, 0, 5, 3, 1),
+            ExifInterface.ORIENTATION_TRANSVERSE to intArrayOf(5, 3, 1, 4, 2, 0),
+            ExifInterface.ORIENTATION_ROTATE_270 to intArrayOf(1, 3, 5, 0, 2, 4),
+        )
+        for ((orientation, upright) in expected) {
+            val (degrees, flip) = exifTurn(orientation)
+            assertArrayEquals("orientation $orientation", upright, storedToUpright(IntArray(6) { it }, 2, 3, degrees, flip))
+        }
     }
 
     @Test
-    fun `exif flip vertical mirrors top to bottom`() {
-        // EXIF orientation 4: rotationDegrees 180, flipped.
-        assertArrayEquals(intArrayOf(4, 5, 2, 3, 0, 1), storedToUpright(IntArray(6) { it }, 2, 3, 180, true))
+    fun `exif turns match ExifInterface rotationDegrees and isFlipped`() {
+        assertEquals(270 to true, exifTurn(ExifInterface.ORIENTATION_TRANSPOSE))
+        assertEquals(90 to true, exifTurn(ExifInterface.ORIENTATION_TRANSVERSE))
+        assertEquals(0 to false, exifTurn(ExifInterface.ORIENTATION_UNDEFINED))
     }
 
     @Test
