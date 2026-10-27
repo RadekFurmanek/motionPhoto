@@ -134,7 +134,8 @@ data class SessionState(
 }
 
 sealed interface SessionEvent {
-    data class Saved(val media: SavedMedia) : SessionEvent
+    /** [notice] explains a shot saved plainer than asked (a custom portrait that came out as an ordinary photo). */
+    data class Saved(val media: SavedMedia, val notice: String? = null) : SessionEvent
     data class CaptureFailed(val message: String) : SessionEvent
     /** The recording stopped early (storage full, camera taken away); what was recorded is saved at [uri]. */
     data class RecordingInterrupted(val uri: Uri?) : SessionEvent
@@ -189,9 +190,13 @@ class CameraSession(
     private val panoramaCapture = PanoramaCapture(app)
     private var panoramaJob: Job? = null
 
-    // Lives as long as the session, which is the app process; there is no point at which to close it.
-    private val subjectMasker = MlKitSubjectMasker(app)
-    private val portraitProcessor = PortraitProcessor(subjectMasker)
+    // Built on first use, so modes other than Portrait never pay for ML Kit. Lives as long as the session,
+    // which is the app process; there is no point at which to close it.
+    private val subjectMasker by lazy { MlKitSubjectMasker(app) }
+    private val portraitProcessor by lazy { PortraitProcessor(subjectMasker) }
+
+    /** Whether Google Play services can run the portrait model; checked once, off the main thread. */
+    private var customPortraitAvailable: Boolean? = null
 
     /** The bound Portrait mode is the app's own (no maker bokeh): photos are processed before saving. */
     private var customPortraitBound = false
@@ -391,9 +396,7 @@ class CameraSession(
                 _state.update { it.copy(countdown = null) }
                 val shot = shoot(imageCapture)
                 _state.update { it.copy(lastCapture = shot.media.uri) }
-                _events.tryEmit(SessionEvent.Saved(shot.media))
-                // After Saved: the screen shows the latest event, and this one explains what was saved.
-                shot.problem?.let { _events.tryEmit(SessionEvent.CaptureFailed(it)) }
+                _events.tryEmit(SessionEvent.Saved(shot.media, shot.notice))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -407,8 +410,8 @@ class CameraSession(
         }
     }
 
-    /** A saved shot; [problem] says why it came out plainer than asked (a custom portrait that did not work). */
-    private class Shot(val media: SavedMedia, val problem: String? = null)
+    /** A saved shot; [notice] says why it came out plainer than asked (a custom portrait that did not work). */
+    private class Shot(val media: SavedMedia, val notice: String? = null)
 
     private suspend fun shoot(imageCapture: ImageCapture): Shot = coroutineScope {
         val capturedAt = System.currentTimeMillis()
@@ -425,7 +428,7 @@ class CameraSession(
                 val media = photoCapture.capturePhoto(imageCapture, capturedAt, mirrored, location) { file ->
                     outcome = portraitProcessor.process(file, resolution)
                 }
-                Shot(media, portraitProblem(outcome)?.let(app::getString))
+                Shot(media, portraitNotice(outcome)?.let(app::getString))
             }
             settings.mode == CaptureMode.PHOTO && settings.effectiveLivePhoto() && videoCapture != null ->
                 Shot(photoCapture.captureMotionPhoto(imageCapture, videoCapture, capturedAt, mirrored, location))
@@ -806,7 +809,7 @@ class CameraSession(
             selector,
             extensions,
             hasRotationVector = panoramaCapture.available,
-            customPortrait = subjectMasker.available,
+            customPortrait = customPortraitAvailable(),
         )
         val lensFacing = cameraInfo.lensFacing
 
@@ -1020,6 +1023,10 @@ class CameraSession(
         }
     }
 
+    private suspend fun customPortraitAvailable(): Boolean =
+        customPortraitAvailable ?: withContext(Dispatchers.Default) { subjectMasker.available }
+            .also { customPortraitAvailable = it }
+
     /** Fire and forget: without the segmentation model a portrait is saved as an ordinary photo until it arrives. */
     private fun startPortraitModelDownload() {
         scope.launch {
@@ -1176,14 +1183,6 @@ class CameraSession(
         const val EVENT_BUFFER = 64
         const val ZOOM_ANIMATION_MS = 300L
         const val ZOOM_FRAME_MS = 16L
-
-        /** What to tell the user when a custom portrait came out as an ordinary photo; null for a portrait. */
-        fun portraitProblem(outcome: PortraitOutcome): Int? = when (outcome) {
-            PortraitOutcome.PORTRAIT -> null
-            PortraitOutcome.NO_SUBJECT -> R.string.portrait_no_subject
-            PortraitOutcome.MODEL_MISSING -> R.string.portrait_model_downloading
-            PortraitOutcome.OUT_OF_MEMORY, PortraitOutcome.FAILED -> R.string.portrait_failed
-        }
 
         // 1:1 is cropped from the 4:3 stream by the view port.
         fun PhotoAspect.streamAspect(): Int =

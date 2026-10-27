@@ -150,7 +150,8 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                         MediaKind.PANORAMA -> R.string.saved_panorama
                     }
                     val result = snackbarHostState.showSnackbar(
-                        message = resources.getString(message),
+                        // A notice (portrait saved as an ordinary photo) says more than "saved".
+                        message = event.notice ?: resources.getString(message),
                         actionLabel = resources.getString(R.string.view),
                         withDismissAction = true,
                         duration = SnackbarDuration.Short,
