@@ -11,7 +11,6 @@ import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import kotlinx.coroutines.tasks.await
 import java.io.Closeable
-import java.util.concurrent.atomic.AtomicBoolean
 
 /** Foreground confidence (0..1) per pixel, row by row. */
 class Mask(val width: Int, val height: Int, val confidence: FloatArray)
@@ -41,7 +40,10 @@ class MlKitSubjectMasker(context: Context) : SubjectMasker, Closeable {
     /** Once the model is installed it stays, so later calls skip the Play services checks. */
     @Volatile
     private var modelReady = false
-    private val installRequested = AtomicBoolean(false)
+
+    /** When the model download was last requested. */
+    @Volatile
+    private var installRequestedAt = 0L
 
     override suspend fun ensureModel(): Boolean {
         if (modelReady) return true
@@ -50,8 +52,11 @@ class MlKitSubjectMasker(context: Context) : SubjectMasker, Closeable {
             modelReady = true
             return true
         }
-        // Fire and forget, once per process: the photo being taken now stays ordinary, later ones get the portrait.
-        if (installRequested.compareAndSet(false, true)) {
+        // Fire and forget, at most once a minute, so a request lost offline is asked again: the photo being
+        // taken now stays ordinary, later ones get the portrait.
+        val now = System.currentTimeMillis()
+        if (now - installRequestedAt >= INSTALL_RETRY_MS) {
+            installRequestedAt = now
             moduleInstall.installModules(ModuleInstallRequest.newBuilder().addApi(segmenter).build())
         }
         return false
@@ -68,4 +73,8 @@ class MlKitSubjectMasker(context: Context) : SubjectMasker, Closeable {
     }
 
     override fun close() = segmenter.close()
+
+    private companion object {
+        const val INSTALL_RETRY_MS = 60_000L
+    }
 }
