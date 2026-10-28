@@ -314,6 +314,7 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 onUpdate = viewModel::updateSettings,
                 onOpenSettings = { showSettings = true },
                 direct = state.direct != null,
+                directFlash = state.directFlash,
             )
             recording?.let {
                 RecordingIndicator(

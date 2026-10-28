@@ -1,5 +1,7 @@
 package cz.furmanek.motionphoto.camera
 
+import android.hardware.camera2.CameraMetadata
+import cz.furmanek.motionphoto.settings.FlashSetting
 import kotlin.math.roundToInt
 
 /** What a camera opened through Camera2 is for: a hidden lens (Macro, the ultra-wide) or the app's own night. */
@@ -56,3 +58,14 @@ fun cropRegion(activeWidth: Int, activeHeight: Int, zoom: Float): IntArray {
 fun largest43(sizes: List<Pair<Int, Int>>, maxLong: Int = Int.MAX_VALUE): Pair<Int, Int>? = sizes
     .filter { (w, h) -> w * 3 == h * 4 && maxOf(w, h) <= maxLong }
     .maxByOrNull { (w, h) -> w.toLong() * h }
+
+/** The auto exposure mode that fires the flash as [flash] says; plain auto exposure without a flash unit. */
+fun aeModeFor(flash: FlashSetting, hasFlash: Boolean): Int = when {
+    !hasFlash -> CameraMetadata.CONTROL_AE_MODE_ON
+    flash == FlashSetting.AUTO -> CameraMetadata.CONTROL_AE_MODE_ON_AUTO_FLASH
+    flash == FlashSetting.ON -> CameraMetadata.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+    else -> CameraMetadata.CONTROL_AE_MODE_ON
+}
+
+/** The metering before a flash shot is over once auto exposure was [seen] metering and has left that [aeState]. */
+fun precaptureSettled(aeState: Int?, seen: Boolean): Boolean = seen && aeState != CameraMetadata.CONTROL_AE_STATE_PRECAPTURE

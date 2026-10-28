@@ -29,6 +29,7 @@ import cz.furmanek.motionphoto.night.NightSensor
 import cz.furmanek.motionphoto.night.YuvFrame
 import cz.furmanek.motionphoto.night.copyYuv
 import cz.furmanek.motionphoto.night.nightSensor
+import cz.furmanek.motionphoto.settings.FlashSetting
 import java.io.File
 import java.util.concurrent.Executor
 import kotlin.math.roundToInt
@@ -89,6 +90,9 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
         ?.let { (w, h) -> Size(w, h) }
         ?: throw DirectCameraException("camera $cameraId has no 4:3 still size")
 
+    /** The camera has its own flash; a night burst never fires it. */
+    val hasFlash: Boolean = !night && characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+
     /** What a night burst can set by hand. */
     val nightSensor: NightSensor = nightSensor(characteristics)
 
@@ -102,11 +106,20 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
         private set
     @Volatile private var lastFocusDistance: Float? = null
 
+    /** Set while the flash meters before a shot; completes once auto exposure has it. */
+    @Volatile private var precapture: CompletableDeferred<Unit>? = null
+    @Volatile private var precaptureSeen = false
+
     private val previewResults = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
             result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { lastExposureNs = it }
             result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { lastIso = it }
             result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastFocusDistance = it }
+            precapture?.let { metered ->
+                val ae = result.get(CaptureResult.CONTROL_AE_STATE)
+                if (ae == CameraMetadata.CONTROL_AE_STATE_PRECAPTURE) precaptureSeen = true
+                if (precaptureSettled(ae, precaptureSeen)) metered.complete(Unit)
+            }
         }
     }
 
@@ -127,6 +140,7 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
 
     private var zoom = 1f
     private var exposure = 0
+    private var flash = FlashSetting.OFF
     private var metering: MeteringRectangle? = null
     private val resumeContinuousFocus = Runnable { metering = null; repeatPreview() }
 
@@ -259,6 +273,13 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
 
     val zoomRatio: Float get() = zoom
 
+    /** The flash for the next shots; the preview's auto exposure follows it so it knows when the flash is needed. */
+    fun setFlash(setting: FlashSetting) {
+        if (setting == flash) return
+        flash = setting
+        repeatPreview()
+    }
+
     /** Takes a still and writes the JPEG to [file], turned by [jpegOrientation] degrees. */
     suspend fun capture(file: File, jpegOrientation: Int) {
         val camera = device ?: throw DirectCameraException("camera $cameraId not open")
@@ -271,6 +292,7 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
                 image.complete(ByteArray(buffer.remaining()).also(buffer::get))
             }
         }, handler)
+        if (hasFlash && flash != FlashSetting.OFF) meterFlash(camera, session)
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
             addTarget(reader.surface)
             applySettings()
@@ -291,6 +313,34 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
         val bytes = withTimeoutOrNull(CAPTURE_TIMEOUT_MS) { image.await() }
             ?: throw DirectCameraException("no image from camera $cameraId")
         withContext(Dispatchers.IO) { file.writeBytes(bytes) }
+    }
+
+    /**
+     * Lets auto exposure meter with a pre-flash, so the still knows whether and how hard to fire. Gives up after
+     * [PRECAPTURE_TIMEOUT_MS]: a phone that never reports the metering still gets its shot.
+     */
+    private suspend fun meterFlash(camera: CameraDevice, session: CameraCaptureSession) {
+        val preview = preview ?: return
+        val metered = CompletableDeferred<Unit>()
+        precaptureSeen = false
+        precapture = metered
+        try {
+            val trigger = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(preview)
+                applySettings()
+                set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+            }
+            session.capture(trigger.build(), previewResults, handler)
+            if (withTimeoutOrNull(PRECAPTURE_TIMEOUT_MS) { metered.await() } == null) {
+                Log.w(TAG, "Camera $cameraId: flash metering did not finish, shooting anyway")
+            }
+        } catch (e: CameraAccessException) {
+            throw DirectCameraException("flash metering refused: ${e.reason}", e)
+        } catch (e: IllegalStateException) {
+            throw DirectCameraException("flash metering refused", e)
+        } finally {
+            precapture = null
+        }
     }
 
     /**
@@ -408,7 +458,7 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
             CaptureRequest.CONTROL_AF_MODE,
             if (region != null) CameraMetadata.CONTROL_AF_MODE_AUTO else CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
         )
-        set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+        set(CaptureRequest.CONTROL_AE_MODE, aeModeFor(flash, hasFlash))
         set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, exposure)
         set(CaptureRequest.SCALER_CROP_REGION, crop())
         if (region != null) {
@@ -449,6 +499,7 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
         const val MAX_PREVIEW_LONG_SIDE = 1920
         const val OPEN_TIMEOUT_MS = 5_000L
         const val CAPTURE_TIMEOUT_MS = 8_000L
+        const val PRECAPTURE_TIMEOUT_MS = 2_000L
         const val FOCUS_HOLD_MS = 5_000L
         const val METERING_FRACTION = 0.1f
         const val JPEG_QUALITY: Byte = 95

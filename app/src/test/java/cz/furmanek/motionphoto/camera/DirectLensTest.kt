@@ -1,8 +1,12 @@
 package cz.furmanek.motionphoto.camera
 
+import android.hardware.camera2.CameraMetadata
 import android.view.Surface
+import cz.furmanek.motionphoto.settings.FlashSetting
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -65,5 +69,26 @@ class DirectLensTest {
         assertEquals(4000 to 3000, largest43(sizes))
         assertEquals(1920 to 1440, largest43(sizes, maxLong = 1920))
         assertNull(largest43(listOf(1920 to 1080)))
+    }
+
+    @Test
+    fun `flash setting picks the auto exposure mode`() {
+        assertEquals(CameraMetadata.CONTROL_AE_MODE_ON, aeModeFor(FlashSetting.OFF, hasFlash = true))
+        assertEquals(CameraMetadata.CONTROL_AE_MODE_ON_AUTO_FLASH, aeModeFor(FlashSetting.AUTO, hasFlash = true))
+        assertEquals(CameraMetadata.CONTROL_AE_MODE_ON_ALWAYS_FLASH, aeModeFor(FlashSetting.ON, hasFlash = true))
+    }
+
+    @Test
+    fun `no flash unit means no flash`() {
+        assertEquals(CameraMetadata.CONTROL_AE_MODE_ON, aeModeFor(FlashSetting.ON, hasFlash = false))
+        assertEquals(CameraMetadata.CONTROL_AE_MODE_ON, aeModeFor(FlashSetting.AUTO, hasFlash = false))
+    }
+
+    @Test
+    fun `metering for the flash ends once it has run`() {
+        assertFalse(precaptureSettled(CameraMetadata.CONTROL_AE_STATE_SEARCHING, seen = false))
+        assertFalse(precaptureSettled(CameraMetadata.CONTROL_AE_STATE_PRECAPTURE, seen = true))
+        assertTrue(precaptureSettled(CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED, seen = true))
+        assertTrue(precaptureSettled(CameraMetadata.CONTROL_AE_STATE_CONVERGED, seen = true))
     }
 }

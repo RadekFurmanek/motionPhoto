@@ -25,7 +25,7 @@ private const val HIGHEST_PROBED_ID = 15
  * A camera the phone lists: [cameraId] is what CameraX binds; [physicalId] a physical camera inside it (null for
  * the camera itself). [minFocusDiopters] is 1 / the closest focus in metres, 0 for fixed focus. A [hidden] camera is
  * missing from the phone's list but answered when asked by id; CameraX cannot open it, the app opens it through
- * Camera2 itself. [sensorWidthMm] (0 when unknown) and [focalMm] give the field of view.
+ * Camera2 itself. [sensorWidthMm] (0 when unknown) and [focalMm] give the field of view. [flash]: it has its own flash.
  */
 data class LensInfo(
     val cameraId: String,
@@ -36,6 +36,7 @@ data class LensInfo(
     val hidden: Boolean = false,
     val sensorWidthMm: Float = 0f,
     val sensorOrientation: Int = 90,
+    val flash: Boolean = false,
 )
 
 /** How Macro is done on this phone. */
@@ -120,4 +121,5 @@ private fun lensInfo(cameraId: String, physicalId: String?, back: Boolean, chara
     minFocusDiopters = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
     sensorWidthMm = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.width ?: 0f,
     sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90,
+    flash = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true,
 )

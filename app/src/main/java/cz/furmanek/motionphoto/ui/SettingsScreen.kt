@@ -258,7 +258,7 @@ private fun nightDescription(sensor: NightSensor): String {
     }
 }
 
-/** One camera on a line: its id, which way it faces, focal length and closest focus. */
+/** One camera on a line: its id, which way it faces, focal length, closest focus and whether it has a flash. */
 @Composable
 private fun lensDescription(lens: LensInfo): String {
     val id = lens.physicalId?.let { stringResource(R.string.camera_physical, it, lens.cameraId) } ?: lens.cameraId
@@ -266,7 +266,8 @@ private fun lensDescription(lens: LensInfo): String {
         if (lens.hidden) " · " + stringResource(R.string.camera_hidden) else ""
     val focus = minFocusCm(lens.minFocusDiopters)?.let { stringResource(R.string.camera_focus_cm, it) }
         ?: stringResource(R.string.camera_focus_fixed)
-    return "$id · $facing · ${"%.1f".format(lens.focalMm)} mm · $focus"
+    val flash = if (lens.flash) " · " + stringResource(R.string.camera_flash) else ""
+    return "$id · $facing · ${"%.1f".format(lens.focalMm)} mm · $focus$flash"
 }
 
 @Composable

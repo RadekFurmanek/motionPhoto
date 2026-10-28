@@ -60,8 +60,9 @@ fun QuickSettingsBar(
     onUpdate: ((CameraSettings) -> CameraSettings) -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
-    /** The hidden camera shows: only a plain 4:3 photo without flash, so those controls are greyed. */
+    /** The hidden camera shows: only a plain 4:3 photo, so those controls are greyed; flash too unless it has one. */
     direct: Boolean = false,
+    directFlash: Boolean = false,
 ) {
     val hasFlash = capabilities?.hasFlash == true
     Row(
@@ -71,7 +72,7 @@ fun QuickSettingsBar(
     ) {
         when (settings.mode) {
             CaptureMode.PHOTO -> {
-                if (hasFlash) FlashButton(settings, locked || direct, onUpdate)
+                if (hasFlash) FlashButton(settings, locked || (direct && !directFlash), onUpdate)
                 TimerButton(settings, locked, onUpdate)
                 BarText(stringResource(settings.aspect.labelRes()), stringResource(R.string.aspect_ratio), enabled = !locked && !direct) {
                     onUpdate { it.copy(aspect = PhotoAspect.entries.next(it.aspect)) }
@@ -100,7 +101,8 @@ fun QuickSettingsBar(
                 }
             }
             CaptureMode.PORTRAIT, CaptureMode.NIGHT -> {
-                if (hasFlash) FlashButton(settings, locked, onUpdate)
+                // The app's own night burst never fires the flash.
+                if (hasFlash) FlashButton(settings, locked || (direct && !directFlash), onUpdate)
                 TimerButton(settings, locked, onUpdate)
             }
             CaptureMode.VIDEO -> {

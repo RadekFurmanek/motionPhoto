@@ -162,6 +162,8 @@ data class SessionState(
     val macro: Boolean = false,
     /** A hidden camera, opened through Camera2, shows instead of the CameraX preview. */
     val direct: DirectKind? = null,
+    /** The hidden camera can fire its flash. */
+    val directFlash: Boolean = false,
     /** A night burst is being shot for this long: the phone must be held still. */
     val nightBurstMs: Long? = null,
 ) {
@@ -616,7 +618,10 @@ class CameraSession(
                 directFailed(e)
                 return@launch
             }
-            _state.update { it.copy(status = SessionStatus.READY, errorMessage = null, exposureIndex = 0) }
+            camera.setFlash(settings.flash)
+            _state.update {
+                it.copy(status = SessionStatus.READY, errorMessage = null, exposureIndex = 0, directFlash = camera.hasFlash)
+            }
             if (night) launch(Dispatchers.Default) { warmUpNight() }
             camera.failed.first { it }
             directFailed(DirectCameraException("camera $id lost"))
@@ -648,6 +653,7 @@ class CameraSession(
     }
 
     private fun closeDirect() {
+        _state.update { it.copy(directFlash = false) }
         directJob?.cancel()
         directJob = null
         directCamera?.close()
@@ -1781,6 +1787,7 @@ class CameraSession(
             FlashSetting.AUTO -> ImageCapture.FLASH_MODE_AUTO
             FlashSetting.ON -> ImageCapture.FLASH_MODE_ON
         }
+        directCamera?.setFlash(settings.flash)
         val camera = camera ?: return
         if (camera.cameraInfo.hasFlashUnit()) {
             camera.cameraControl.enableTorch(settings.mode.isVideo() && settings.torch)
