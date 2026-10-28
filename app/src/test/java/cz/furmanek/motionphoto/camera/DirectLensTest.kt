@@ -91,4 +91,10 @@ class DirectLensTest {
         assertTrue(precaptureSettled(CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED, seen = true))
         assertTrue(precaptureSettled(CameraMetadata.CONTROL_AE_STATE_CONVERGED, seen = true))
     }
+
+    @Test
+    fun `a lit torch keeps the flash from firing`() {
+        assertEquals(CameraMetadata.CONTROL_AE_MODE_ON, aeModeFor(FlashSetting.ON, hasFlash = true, torch = true))
+        assertEquals(CameraMetadata.CONTROL_AE_MODE_ON, aeModeFor(FlashSetting.AUTO, hasFlash = true, torch = true))
+    }
 }

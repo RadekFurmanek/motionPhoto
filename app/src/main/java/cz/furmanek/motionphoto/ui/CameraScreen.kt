@@ -315,6 +315,9 @@ fun CameraScreen(viewModel: CameraViewModel = viewModel()) {
                 onOpenSettings = { showSettings = true },
                 direct = state.direct != null,
                 directFlash = state.directFlash,
+                macro = state.macro,
+                macroTorch = state.macroTorch,
+                onMacroTorch = viewModel::setMacroTorch,
             )
             recording?.let {
                 RecordingIndicator(

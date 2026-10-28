@@ -59,9 +59,12 @@ fun largest43(sizes: List<Pair<Int, Int>>, maxLong: Int = Int.MAX_VALUE): Pair<I
     .filter { (w, h) -> w * 3 == h * 4 && maxOf(w, h) <= maxLong }
     .maxByOrNull { (w, h) -> w.toLong() * h }
 
-/** The auto exposure mode that fires the flash as [flash] says; plain auto exposure without a flash unit. */
-fun aeModeFor(flash: FlashSetting, hasFlash: Boolean): Int = when {
-    !hasFlash -> CameraMetadata.CONTROL_AE_MODE_ON
+/**
+ * The auto exposure mode that fires the flash as [flash] says; plain auto exposure without a flash unit, or while
+ * the [torch] already lights the scene.
+ */
+fun aeModeFor(flash: FlashSetting, hasFlash: Boolean, torch: Boolean = false): Int = when {
+    !hasFlash || torch -> CameraMetadata.CONTROL_AE_MODE_ON
     flash == FlashSetting.AUTO -> CameraMetadata.CONTROL_AE_MODE_ON_AUTO_FLASH
     flash == FlashSetting.ON -> CameraMetadata.CONTROL_AE_MODE_ON_ALWAYS_FLASH
     else -> CameraMetadata.CONTROL_AE_MODE_ON

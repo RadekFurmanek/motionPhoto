@@ -90,6 +90,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setMacro(on: Boolean) = session.setMacro(on)
 
+    fun setMacroTorch(on: Boolean) = session.setMacroTorch(on)
+
     private val _hiddenProbe = MutableStateFlow<Map<String, ProbeResult>?>(null)
 
     /** Results of trying the hidden cameras, by id; null until tried. */

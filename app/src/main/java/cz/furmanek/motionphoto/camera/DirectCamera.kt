@@ -141,6 +141,7 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
     private var zoom = 1f
     private var exposure = 0
     private var flash = FlashSetting.OFF
+    private var torch = false
     private var metering: MeteringRectangle? = null
     private val resumeContinuousFocus = Runnable { metering = null; repeatPreview() }
 
@@ -280,6 +281,14 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
         repeatPreview()
     }
 
+    /** Keeps the flash lit as a lamp (Macro); a shot then needs no flash. */
+    fun setTorch(on: Boolean) {
+        val lit = on && hasFlash
+        if (lit == torch) return
+        torch = lit
+        repeatPreview()
+    }
+
     /** Takes a still and writes the JPEG to [file], turned by [jpegOrientation] degrees. */
     suspend fun capture(file: File, jpegOrientation: Int) {
         val camera = device ?: throw DirectCameraException("camera $cameraId not open")
@@ -292,7 +301,7 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
                 image.complete(ByteArray(buffer.remaining()).also(buffer::get))
             }
         }, handler)
-        if (hasFlash && flash != FlashSetting.OFF) meterFlash(camera, session)
+        if (hasFlash && !torch && flash != FlashSetting.OFF) meterFlash(camera, session)
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
             addTarget(reader.surface)
             applySettings()
@@ -458,7 +467,8 @@ class DirectCamera(context: Context, val cameraId: String, val night: Boolean = 
             CaptureRequest.CONTROL_AF_MODE,
             if (region != null) CameraMetadata.CONTROL_AF_MODE_AUTO else CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
         )
-        set(CaptureRequest.CONTROL_AE_MODE, aeModeFor(flash, hasFlash))
+        set(CaptureRequest.CONTROL_AE_MODE, aeModeFor(flash, hasFlash, torch))
+        set(CaptureRequest.FLASH_MODE, if (torch) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF)
         set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, exposure)
         set(CaptureRequest.SCALER_CROP_REGION, crop())
         if (region != null) {

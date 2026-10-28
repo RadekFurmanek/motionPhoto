@@ -164,6 +164,8 @@ data class SessionState(
     val direct: DirectKind? = null,
     /** The hidden camera can fire its flash. */
     val directFlash: Boolean = false,
+    /** The flash shines as a lamp while Macro is on. */
+    val macroTorch: Boolean = false,
     /** A night burst is being shot for this long: the phone must be held still. */
     val nightBurstMs: Long? = null,
 ) {
@@ -619,6 +621,7 @@ class CameraSession(
                 return@launch
             }
             camera.setFlash(settings.flash)
+            camera.setTorch(_state.value.macroTorch && macroOn)
             _state.update {
                 it.copy(status = SessionStatus.READY, errorMessage = null, exposureIndex = 0, directFlash = camera.hasFlash)
             }
@@ -806,13 +809,22 @@ class CameraSession(
     fun setMacro(on: Boolean) {
         if (isLocked()) return
         macroOn = on
-        _state.update { it.copy(macro = on) }
+        _state.update { it.copy(macro = on, macroTorch = it.macroTorch && on) }
+        applyCameraControls()
         requestBind()
     }
 
     private fun setMacroOff() {
         macroOn = false
-        _state.update { it.copy(macro = false) }
+        _state.update { it.copy(macro = false, macroTorch = false) }
+        applyCameraControls()
+    }
+
+    /** Lights the flash as a lamp for a close subject; it goes out with Macro. */
+    fun setMacroTorch(on: Boolean) {
+        if (isLocked() || !macroOn) return
+        _state.update { it.copy(macroTorch = on) }
+        applyCameraControls()
     }
 
     /** What Macro binds now: null while it is off or outside Photo on the back camera. */
@@ -1782,15 +1794,18 @@ class CameraSession(
     }
 
     private fun applyCameraControls() {
-        imageCapture?.flashMode = when (settings.flash) {
-            FlashSetting.OFF -> ImageCapture.FLASH_MODE_OFF
+        val macroTorch = _state.value.macroTorch && macroOn
+        // The lamp already lights the subject: a flash on top would only wash it out.
+        imageCapture?.flashMode = when (settings.flash.takeUnless { macroTorch }) {
             FlashSetting.AUTO -> ImageCapture.FLASH_MODE_AUTO
             FlashSetting.ON -> ImageCapture.FLASH_MODE_ON
+            FlashSetting.OFF, null -> ImageCapture.FLASH_MODE_OFF
         }
         directCamera?.setFlash(settings.flash)
+        directCamera?.setTorch(macroTorch)
         val camera = camera ?: return
         if (camera.cameraInfo.hasFlashUnit()) {
-            camera.cameraControl.enableTorch(settings.mode.isVideo() && settings.torch)
+            camera.cameraControl.enableTorch(settings.mode.isVideo() && settings.torch || macroTorch)
         }
     }
 

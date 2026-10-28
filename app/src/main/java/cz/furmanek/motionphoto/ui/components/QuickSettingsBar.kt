@@ -63,6 +63,10 @@ fun QuickSettingsBar(
     /** The hidden camera shows: only a plain 4:3 photo, so those controls are greyed; flash too unless it has one. */
     direct: Boolean = false,
     directFlash: Boolean = false,
+    /** Macro is on: a lamp button lights the close subject, [macroTorch] while it is lit. */
+    macro: Boolean = false,
+    macroTorch: Boolean = false,
+    onMacroTorch: (Boolean) -> Unit = {},
 ) {
     val hasFlash = capabilities?.hasFlash == true
     Row(
@@ -72,7 +76,19 @@ fun QuickSettingsBar(
     ) {
         when (settings.mode) {
             CaptureMode.PHOTO -> {
-                if (hasFlash) FlashButton(settings, locked || (direct && !directFlash), onUpdate)
+                val flashUsable = if (direct) directFlash else hasFlash
+                // A lit lamp lights the shot itself, so the flash waits.
+                if (hasFlash) FlashButton(settings, locked || !flashUsable || macroTorch, onUpdate)
+                if (macro && flashUsable) {
+                    BarIcon(
+                        if (macroTorch) Icons.Filled.FlashlightOn else Icons.Filled.FlashlightOff,
+                        stringResource(R.string.torch),
+                        enabled = !locked,
+                        highlighted = macroTorch,
+                    ) {
+                        onMacroTorch(!macroTorch)
+                    }
+                }
                 TimerButton(settings, locked, onUpdate)
                 BarText(stringResource(settings.aspect.labelRes()), stringResource(R.string.aspect_ratio), enabled = !locked && !direct) {
                     onUpdate { it.copy(aspect = PhotoAspect.entries.next(it.aspect)) }
