@@ -19,8 +19,8 @@ android {
         // Scoped storage (MediaStore RELATIVE_PATH / IS_PENDING) needs API 29.
         minSdk = 29
         targetSdk = 37
-        versionCode = 18
-        versionName = "0.11.0"
+        versionCode = 19
+        versionName = "0.11.1"
     }
 
     signingConfigs {
