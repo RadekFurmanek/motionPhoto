@@ -54,6 +54,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -102,6 +103,7 @@ import cz.furmanek.motionphoto.ui.components.LastCaptureThumbnail
 import cz.furmanek.motionphoto.ui.components.LensChips
 import cz.furmanek.motionphoto.ui.components.MacroChip
 import cz.furmanek.motionphoto.ui.components.ModeBar
+import cz.furmanek.motionphoto.ui.components.rememberModeBarState
 import cz.furmanek.motionphoto.ui.components.PanoramaGuide
 import cz.furmanek.motionphoto.ui.components.PanoramaLevel
 import cz.furmanek.motionphoto.ui.components.PanoramaStitching
@@ -110,10 +112,11 @@ import cz.furmanek.motionphoto.ui.components.RecordingIndicator
 import cz.furmanek.motionphoto.ui.components.ShutterButton
 import cz.furmanek.motionphoto.ui.components.ZoomChips
 import cz.furmanek.motionphoto.ui.components.outputAspect
-import kotlin.math.abs
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 
 private const val FOCUS_INDICATOR_VISIBLE_MS = 1_200L
 private const val EXPOSURE_SLIDER_VISIBLE_MS = 3_000L
@@ -392,24 +395,25 @@ private fun BottomControls(
     val isVideo = settings.mode.isVideo()
     val modes = capabilities?.let { availableModes(it, state.lensFacing) } ?: DEFAULT_MODES
     val swipeThresholdPx = with(LocalDensity.current) { MODE_SWIPE_THRESHOLD.toPx() }
+    val modeBar = rememberModeBarState(modes.indexOf(settings.mode).coerceAtLeast(0))
+    val scope = rememberCoroutineScope()
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .pointerInput(locked, modes) {
                 if (locked) return@pointerInput
-                var dragged = 0f
+                // The mode labels slide with the finger and settle on the nearest one when it lets go.
+                val release = {
+                    val next = modeBar.release(swipeThresholdPx).coerceIn(modes.indices)
+                    scope.launch(start = CoroutineStart.UNDISPATCHED) { modeBar.settle(next) }
+                    if (modes[next] != viewModel.settings.value.mode) viewModel.setMode(modes[next])
+                }
                 detectHorizontalDragGestures(
-                    onDragStart = { dragged = 0f },
-                    onDragEnd = {
-                        if (abs(dragged) >= swipeThresholdPx) {
-                            val index = modes.indexOf(viewModel.settings.value.mode)
-                            // Swiping left moves to the mode on the right, as in other camera apps.
-                            val next = (index + if (dragged < 0) 1 else -1).coerceIn(modes.indices)
-                            viewModel.setMode(modes[next])
-                        }
-                    },
-                ) { _, dragAmount -> dragged += dragAmount }
+                    onDragStart = { modeBar.startDrag() },
+                    onDragEnd = release,
+                    onDragCancel = release,
+                ) { _, dragAmount -> modeBar.dragBy(dragAmount) }
             },
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -436,7 +440,7 @@ private fun BottomControls(
             }
         }
 
-        ModeBar(modes, settings.mode, enabled = !locked, onSelect = viewModel::setMode)
+        ModeBar(modes, settings.mode, enabled = !locked, onSelect = viewModel::setMode, state = modeBar)
 
         Row(
             modifier = Modifier.fillMaxWidth(),
